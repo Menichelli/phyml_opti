@@ -66,6 +66,20 @@ AS_IF([test "x$enable_native" = "xno"],
       [VECTOR_FLAG="-DDISABLE_NATIVE"],
       [VECTOR_FLAG="${DEFAULT_VECTOR_FLAG}"])
 
+AC_ARG_ENABLE([opt-partial-lk],
+              [AS_HELP_STRING([--disable-opt-partial-lk],
+                              [Disable specialized partial-likelihood optimizations (enabled by default).])],
+              [],
+              [enable_opt_partial_lk=yes])
+
+AS_IF([test "x$enable_opt_partial_lk" = "xno"],
+      [PHYML_OPT_PARTIAL_LK_VALUE=0],
+      [PHYML_OPT_PARTIAL_LK_VALUE=1])
+
+AC_DEFINE_UNQUOTED([PHYML_OPT_PARTIAL_LK],
+                   [$PHYML_OPT_PARTIAL_LK_VALUE],
+                   [Enable specialized partial-likelihood scalar and SIMD optimizations.])
+
 
 LDFLAGS="${ARGC_flag}" 
 

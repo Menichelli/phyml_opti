@@ -15,6 +15,323 @@ the GNU public licence. See http://www.opensource.org for details.
 
 #if ((defined(__AVX__) || defined(__AVX2__)) && !defined(DISABLE_NATIVE))
 
+#ifndef PHYML_OPT_PARTIAL_LK
+#define PHYML_OPT_PARTIAL_LK 1
+#endif
+
+static inline phydbl AVX_Vect_Max(__m256d x);
+static inline phydbl AVX_Vects_Max(const __m256d *x, unsigned int nblocks);
+
+#if PHYML_OPT_PARTIAL_LK
+static inline int AVX_All_One(const phydbl *plk, unsigned int ns)
+{
+  unsigned int i;
+  for(i=0;i<ns;++i) if(plk[i] != 1.0) return 0;
+  return 1;
+}
+
+static inline void AVX_Matrix_Vect_Prod_4(const __m256d *_m_transpose, const phydbl *_v, __m256d *_u)
+{
+  const __m256d x0 = _mm256_set1_pd(_v[0]);
+  const __m256d x1 = _mm256_set1_pd(_v[1]);
+  const __m256d x2 = _mm256_set1_pd(_v[2]);
+  const __m256d x3 = _mm256_set1_pd(_v[3]);
+
+#if (defined(__FMA__))
+  _u[0] = _mm256_fmadd_pd(_m_transpose[3],x3,
+          _mm256_fmadd_pd(_m_transpose[2],x2,
+          _mm256_fmadd_pd(_m_transpose[1],x1,
+                          _mm256_mul_pd(_m_transpose[0],x0))));
+#else
+  _u[0] = _mm256_add_pd(_mm256_add_pd(_mm256_mul_pd(_m_transpose[0],x0),
+                                      _mm256_mul_pd(_m_transpose[1],x1)),
+                        _mm256_add_pd(_mm256_mul_pd(_m_transpose[2],x2),
+                                      _mm256_mul_pd(_m_transpose[3],x3)));
+#endif
+}
+
+static inline void AVX_Matrix_Vect_Prod_20(const __m256d *_m_transpose, const phydbl *_v, __m256d *_u)
+{
+  unsigned int i;
+  __m256d x;
+
+  x = _mm256_set1_pd(_v[0]);
+  _u[0] = _mm256_mul_pd(_m_transpose[0],x);
+  _u[1] = _mm256_mul_pd(_m_transpose[1],x);
+  _u[2] = _mm256_mul_pd(_m_transpose[2],x);
+  _u[3] = _mm256_mul_pd(_m_transpose[3],x);
+  _u[4] = _mm256_mul_pd(_m_transpose[4],x);
+
+  for(i=1;i<20;++i)
+    {
+      const __m256d *row = _m_transpose + 5*i;
+      x = _mm256_set1_pd(_v[i]);
+#if (defined(__FMA__))
+      _u[0] = _mm256_fmadd_pd(row[0],x,_u[0]);
+      _u[1] = _mm256_fmadd_pd(row[1],x,_u[1]);
+      _u[2] = _mm256_fmadd_pd(row[2],x,_u[2]);
+      _u[3] = _mm256_fmadd_pd(row[3],x,_u[3]);
+      _u[4] = _mm256_fmadd_pd(row[4],x,_u[4]);
+#else
+      _u[0] = _mm256_add_pd(_u[0],_mm256_mul_pd(row[0],x));
+      _u[1] = _mm256_add_pd(_u[1],_mm256_mul_pd(row[1],x));
+      _u[2] = _mm256_add_pd(_u[2],_mm256_mul_pd(row[2],x));
+      _u[3] = _mm256_add_pd(_u[3],_mm256_mul_pd(row[3],x));
+      _u[4] = _mm256_add_pd(_u[4],_mm256_mul_pd(row[4],x));
+#endif
+    }
+}
+
+static inline void AVX_Partial_Lk_Exex_4(const __m256d *_tPij1, const int state1,
+                                         const __m256d *_tPij2, const int state2,
+                                         __m256d *plk0)
+{
+  plk0[0] = _mm256_mul_pd(_tPij1[state1],_tPij2[state2]);
+}
+
+static inline void AVX_Partial_Lk_Exex_20(const __m256d *_tPij1, const int state1,
+                                          const __m256d *_tPij2, const int state2,
+                                          __m256d *plk0)
+{
+  const __m256d *col1 = _tPij1 + 5*state1;
+  const __m256d *col2 = _tPij2 + 5*state2;
+
+  plk0[0] = _mm256_mul_pd(col1[0],col2[0]);
+  plk0[1] = _mm256_mul_pd(col1[1],col2[1]);
+  plk0[2] = _mm256_mul_pd(col1[2],col2[2]);
+  plk0[3] = _mm256_mul_pd(col1[3],col2[3]);
+  plk0[4] = _mm256_mul_pd(col1[4],col2[4]);
+}
+
+static inline phydbl AVX_Partial_Lk_Exex_4_Max(const __m256d *_tPij1, const int state1,
+                                               const __m256d *_tPij2, const int state2,
+                                               __m256d *plk0)
+{
+  AVX_Partial_Lk_Exex_4(_tPij1,state1,_tPij2,state2,plk0);
+  return AVX_Vect_Max(plk0[0]);
+}
+
+static inline phydbl AVX_Partial_Lk_Exex_20_Max(const __m256d *_tPij1, const int state1,
+                                                const __m256d *_tPij2, const int state2,
+                                                __m256d *plk0)
+{
+  phydbl largest_p_lk;
+
+  AVX_Partial_Lk_Exex_20(_tPij1,state1,_tPij2,state2,plk0);
+  largest_p_lk = AVX_Vect_Max(plk0[0]);
+  if(AVX_Vect_Max(plk0[1]) > largest_p_lk) largest_p_lk = AVX_Vect_Max(plk0[1]);
+  if(AVX_Vect_Max(plk0[2]) > largest_p_lk) largest_p_lk = AVX_Vect_Max(plk0[2]);
+  if(AVX_Vect_Max(plk0[3]) > largest_p_lk) largest_p_lk = AVX_Vect_Max(plk0[3]);
+  if(AVX_Vect_Max(plk0[4]) > largest_p_lk) largest_p_lk = AVX_Vect_Max(plk0[4]);
+  return largest_p_lk;
+}
+
+static inline void AVX_Partial_Lk_Exin_4(const __m256d *_tPij1, const int state1,
+                                         const __m256d *_tPij2, const phydbl *_plk2,
+                                         __m256d *_pmat2plk2, __m256d *_plk0)
+{
+  AVX_Matrix_Vect_Prod_4(_tPij2,_plk2,_pmat2plk2);
+  _plk0[0] = _mm256_mul_pd(_tPij1[state1],_pmat2plk2[0]);
+}
+
+static inline void AVX_Partial_Lk_Exin_20(const __m256d *_tPij1, const int state1,
+                                          const __m256d *_tPij2, const phydbl *_plk2,
+                                          __m256d *_pmat2plk2, __m256d *_plk0)
+{
+  const __m256d *col1 = _tPij1 + 5*state1;
+
+  AVX_Matrix_Vect_Prod_20(_tPij2,_plk2,_pmat2plk2);
+  _plk0[0] = _mm256_mul_pd(col1[0],_pmat2plk2[0]);
+  _plk0[1] = _mm256_mul_pd(col1[1],_pmat2plk2[1]);
+  _plk0[2] = _mm256_mul_pd(col1[2],_pmat2plk2[2]);
+  _plk0[3] = _mm256_mul_pd(col1[3],_pmat2plk2[3]);
+  _plk0[4] = _mm256_mul_pd(col1[4],_pmat2plk2[4]);
+}
+
+static inline phydbl AVX_Partial_Lk_Exin_4_Max(const __m256d *_tPij1, const int state1,
+                                               const __m256d *_tPij2, const phydbl *_plk2,
+                                               __m256d *_pmat2plk2, __m256d *_plk0)
+{
+  AVX_Partial_Lk_Exin_4(_tPij1,state1,_tPij2,_plk2,_pmat2plk2,_plk0);
+  return AVX_Vect_Max(_plk0[0]);
+}
+
+static inline phydbl AVX_Partial_Lk_Exin_20_Max(const __m256d *_tPij1, const int state1,
+                                                const __m256d *_tPij2, const phydbl *_plk2,
+                                                __m256d *_pmat2plk2, __m256d *_plk0)
+{
+  phydbl largest_p_lk;
+
+  AVX_Partial_Lk_Exin_20(_tPij1,state1,_tPij2,_plk2,_pmat2plk2,_plk0);
+  largest_p_lk = AVX_Vect_Max(_plk0[0]);
+  if(AVX_Vect_Max(_plk0[1]) > largest_p_lk) largest_p_lk = AVX_Vect_Max(_plk0[1]);
+  if(AVX_Vect_Max(_plk0[2]) > largest_p_lk) largest_p_lk = AVX_Vect_Max(_plk0[2]);
+  if(AVX_Vect_Max(_plk0[3]) > largest_p_lk) largest_p_lk = AVX_Vect_Max(_plk0[3]);
+  if(AVX_Vect_Max(_plk0[4]) > largest_p_lk) largest_p_lk = AVX_Vect_Max(_plk0[4]);
+  return largest_p_lk;
+}
+
+static inline void AVX_Partial_Lk_Inin_4(const __m256d *_tPij1, const phydbl *plk1,
+                                         __m256d *_pmat1plk1, const __m256d *_tPij2,
+                                         const phydbl *plk2, __m256d *_pmat2plk2,
+                                         __m256d *_plk0)
+{
+  if(AVX_All_One(plk1,4) && AVX_All_One(plk2,4))
+    {
+      _plk0[0] = _mm256_set1_pd(1.0);
+      return;
+    }
+
+  AVX_Matrix_Vect_Prod_4(_tPij1,plk1,_pmat1plk1);
+  AVX_Matrix_Vect_Prod_4(_tPij2,plk2,_pmat2plk2);
+  _plk0[0] = _mm256_mul_pd(_pmat1plk1[0],_pmat2plk2[0]);
+}
+
+static void AVX_Partial_Lk_Inin_20(const __m256d *_tPij1, const phydbl *plk1,
+                                   __m256d *_pmat1plk1, const __m256d *_tPij2,
+                                   const phydbl *plk2, __m256d *_pmat2plk2,
+                                   __m256d *_plk0)
+{
+  __m256d u2[5];
+
+  (void)_pmat1plk1;
+  (void)_pmat2plk2;
+
+  if(AVX_All_One(plk1,20) && AVX_All_One(plk2,20))
+    {
+      _plk0[0] = _mm256_set1_pd(1.0);
+      _plk0[1] = _mm256_set1_pd(1.0);
+      _plk0[2] = _mm256_set1_pd(1.0);
+      _plk0[3] = _mm256_set1_pd(1.0);
+      _plk0[4] = _mm256_set1_pd(1.0);
+      return;
+    }
+
+  AVX_Matrix_Vect_Prod_20(_tPij1,plk1,_plk0);
+  AVX_Matrix_Vect_Prod_20(_tPij2,plk2,u2);
+
+  _plk0[0] = _mm256_mul_pd(_plk0[0],u2[0]);
+  _plk0[1] = _mm256_mul_pd(_plk0[1],u2[1]);
+  _plk0[2] = _mm256_mul_pd(_plk0[2],u2[2]);
+  _plk0[3] = _mm256_mul_pd(_plk0[3],u2[3]);
+  _plk0[4] = _mm256_mul_pd(_plk0[4],u2[4]);
+}
+
+static inline phydbl AVX_Partial_Lk_Inin_4_Max(const __m256d *_tPij1, const phydbl *plk1,
+                                               __m256d *_pmat1plk1, const __m256d *_tPij2,
+                                               const phydbl *plk2, __m256d *_pmat2plk2,
+                                               __m256d *_plk0)
+{
+  AVX_Partial_Lk_Inin_4(_tPij1,plk1,_pmat1plk1,_tPij2,plk2,_pmat2plk2,_plk0);
+  return AVX_Vect_Max(_plk0[0]);
+}
+
+static inline phydbl AVX_Partial_Lk_Inin_20_Max(const __m256d *_tPij1, const phydbl *plk1,
+                                                __m256d *_pmat1plk1, const __m256d *_tPij2,
+                                                const phydbl *plk2, __m256d *_pmat2plk2,
+                                                __m256d *_plk0)
+{
+  phydbl largest_p_lk;
+
+  AVX_Partial_Lk_Inin_20(_tPij1,plk1,_pmat1plk1,_tPij2,plk2,_pmat2plk2,_plk0);
+  largest_p_lk = AVX_Vect_Max(_plk0[0]);
+  if(AVX_Vect_Max(_plk0[1]) > largest_p_lk) largest_p_lk = AVX_Vect_Max(_plk0[1]);
+  if(AVX_Vect_Max(_plk0[2]) > largest_p_lk) largest_p_lk = AVX_Vect_Max(_plk0[2]);
+  if(AVX_Vect_Max(_plk0[3]) > largest_p_lk) largest_p_lk = AVX_Vect_Max(_plk0[3]);
+  if(AVX_Vect_Max(_plk0[4]) > largest_p_lk) largest_p_lk = AVX_Vect_Max(_plk0[4]);
+  return largest_p_lk;
+}
+
+static inline phydbl AVX_Partial_Lk_Exex_Max(const __m256d *_tPij1, const int state1,
+                                             const __m256d *_tPij2, const int state2,
+                                             const int ns, __m256d *plk0)
+{
+  unsigned const int sz = (int)BYTE_ALIGN / 8;
+  unsigned const int nblocks = ns / sz;
+  phydbl largest_p_lk = -BIG;
+  unsigned int i;
+
+  if(ns == 4) return AVX_Partial_Lk_Exex_4_Max(_tPij1,state1,_tPij2,state2,plk0);
+  if(ns == 20) return AVX_Partial_Lk_Exex_20_Max(_tPij1,state1,_tPij2,state2,plk0);
+
+  _tPij1 = _tPij1 + state1 * nblocks;
+  _tPij2 = _tPij2 + state2 * nblocks;
+  for(i=0;i<nblocks;++i)
+    {
+      const __m256d x = _mm256_mul_pd(_tPij1[i],_tPij2[i]);
+      const phydbl block_max = AVX_Vect_Max(x);
+      plk0[i] = x;
+      if(block_max > largest_p_lk) largest_p_lk = block_max;
+    }
+
+  return largest_p_lk;
+}
+
+static inline phydbl AVX_Partial_Lk_Exin_Max(const __m256d *_tPij1, const int state1,
+                                             const __m256d *_tPij2, const phydbl *_plk2,
+                                             __m256d *_pmat2plk2, const int ns, __m256d *_plk0)
+{
+  unsigned const int sz = (int)BYTE_ALIGN / 8;
+  unsigned const int nblocks = ns / sz;
+  phydbl largest_p_lk = -BIG;
+  unsigned int i;
+
+  if(ns == 4) return AVX_Partial_Lk_Exin_4_Max(_tPij1,state1,_tPij2,_plk2,_pmat2plk2,_plk0);
+  if(ns == 20) return AVX_Partial_Lk_Exin_20_Max(_tPij1,state1,_tPij2,_plk2,_pmat2plk2,_plk0);
+
+  _tPij1 = _tPij1 + state1 * nblocks;
+  AVX_Matrix_Vect_Prod(_tPij2,_plk2,ns,_pmat2plk2);
+
+  for(i=0;i<nblocks;++i)
+    {
+      const __m256d x = _mm256_mul_pd(_tPij1[i],_pmat2plk2[i]);
+      const phydbl block_max = AVX_Vect_Max(x);
+      _plk0[i] = x;
+      if(block_max > largest_p_lk) largest_p_lk = block_max;
+    }
+
+  return largest_p_lk;
+}
+
+static inline phydbl AVX_Partial_Lk_Inin_Max(const __m256d *_tPij1, const phydbl *plk1,
+                                             __m256d *_pmat1plk1, const __m256d *_tPij2,
+                                             const phydbl *plk2, __m256d *_pmat2plk2,
+                                             const int ns, __m256d *_plk0)
+{
+  unsigned int i;
+  unsigned const int sz = (int)BYTE_ALIGN / 8;
+  unsigned const int nblocks = ns / sz;
+  phydbl largest_p_lk = -BIG;
+
+  if(ns == 4) return AVX_Partial_Lk_Inin_4_Max(_tPij1,plk1,_pmat1plk1,_tPij2,plk2,_pmat2plk2,_plk0);
+  if(ns == 20) return AVX_Partial_Lk_Inin_20_Max(_tPij1,plk1,_pmat1plk1,_tPij2,plk2,_pmat2plk2,_plk0);
+
+  for(i=0;i<ns;++i) if(plk1[i] > 1.0 || plk1[i] < 1.0 || plk2[i] > 1.0 || plk2[i] < 1.0) break;
+
+  if(i != ns)
+    {
+      AVX_Matrix_Vect_Prod(_tPij1,plk1,ns,_pmat1plk1);
+      AVX_Matrix_Vect_Prod(_tPij2,plk2,ns,_pmat2plk2);
+
+      for(i=0;i<nblocks;++i)
+        {
+          const __m256d x = _mm256_mul_pd(_pmat1plk1[i],_pmat2plk2[i]);
+          const phydbl block_max = AVX_Vect_Max(x);
+          _plk0[i] = x;
+          if(block_max > largest_p_lk) largest_p_lk = block_max;
+        }
+    }
+  else
+    {
+      for(i=0;i<nblocks;++i) _plk0[i] = _mm256_set1_pd(1.0);
+      largest_p_lk = 1.0;
+    }
+
+  return largest_p_lk;
+}
+
+#endif
+
 //////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////
 
@@ -320,7 +637,8 @@ void AVX_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
   unsigned int catg,site;
   short int state_v1,state_v2;
   short int ambiguity_check_v1,ambiguity_check_v2;
-  phydbl largest_p_lk;
+  phydbl largest_p_lk = -BIG;
+  phydbl catg_largest_p_lk = -BIG;
   int *p_lk_loc;
   
   const unsigned int npattern = tree->n_pattern;
@@ -332,8 +650,20 @@ void AVX_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
   
   const unsigned int sz = (int)BYTE_ALIGN / 8;
   const unsigned nblocks = ns/sz;
+  const unsigned int tmat_catg_step = nsns / sz;
 
   __m256d *_tPij1,*_tPij2,*_pmat1plk1,*_pmat2plk2,*_plk0;
+  const __m256d *init_tPij1,*init_tPij2;
+  int tax_v1, tax_v2;
+  const int scale_fast = (tree->scaling_method == SCALE_FAST);
+  const int do_scaling = (scale_fast && tree->apply_lk_scaling == YES);
+  int plk1_catg_step, plk2_catg_step;
+  int plk1_site_step, plk2_site_step;
+  int plk1_zero_wght_step, plk2_zero_wght_step;
+  const short int *is_ambigu_v1;
+  const short int *is_ambigu_v2;
+  const short int *d_state_v1;
+  const short int *d_state_v2;
 
   _tPij1     = tree->_tPij1;
   _tPij2     = tree->_tPij2;
@@ -357,6 +687,19 @@ void AVX_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
                      &Pij1,&tPij1,&plk1,&sum_scale_v1,
                      &Pij2,&tPij2,&plk2,&sum_scale_v2,
                      d,b,tree);
+
+  tax_v1 = (n_v1->tax != 0);
+  tax_v2 = (n_v2->tax != 0);
+  plk1_catg_step = (tax_v1) ? 0 : ns;
+  plk2_catg_step = (tax_v2) ? 0 : ns;
+  plk1_site_step = (tax_v1) ? ns : 0;
+  plk2_site_step = (tax_v2) ? ns : 0;
+  plk1_zero_wght_step = (tax_v1) ? ns : ncatgns;
+  plk2_zero_wght_step = (tax_v2) ? ns : ncatgns;
+  is_ambigu_v1 = (tax_v1) ? n_v1->c_seq->is_ambigu : NULL;
+  is_ambigu_v2 = (tax_v2) ? n_v2->c_seq->is_ambigu : NULL;
+  d_state_v1   = (tax_v1) ? n_v1->c_seq->d_state : NULL;
+  d_state_v2   = (tax_v2) ? n_v2->c_seq->d_state : NULL;
 
 
   /* PhyML_Printf("\n. b: %d b->left:%d b->rght:%d d:%d [%p,%p]", */
@@ -385,6 +728,8 @@ void AVX_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
     }
   _tPij1 -= ncatg*ns*nblocks;
   _tPij2 -= ncatg*ns*nblocks;
+  init_tPij1 = _tPij1;
+  init_tPij2 = _tPij2;
 
   if(tree->mod->augmented == YES)
     {
@@ -392,7 +737,7 @@ void AVX_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
       PhyML_Printf("\n== allow augmented data.");
       assert(FALSE);
     }
-    
+
   /* For every site in the alignment */
   for(site=0;site<npattern;++site)
     {
@@ -401,122 +746,259 @@ void AVX_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
           state_v1 = state_v2 = -1;
           ambiguity_check_v1 = ambiguity_check_v2 = YES;
           
-          if(n_v1 && n_v1->tax)
+          if(tax_v1)
             {
-              ambiguity_check_v1 = n_v1->c_seq->is_ambigu[site];
-              if(ambiguity_check_v1 == NO) state_v1 = n_v1->c_seq->d_state[site];
+              ambiguity_check_v1 = is_ambigu_v1[site];
+              if(ambiguity_check_v1 == NO) state_v1 = d_state_v1[site];
             }
           
-          if(n_v2 && n_v2->tax)
+          if(tax_v2)
             {
-              ambiguity_check_v2 = n_v2->c_seq->is_ambigu[site];
-              if(ambiguity_check_v2 == NO) state_v2 = n_v2->c_seq->d_state[site];
+              ambiguity_check_v2 = is_ambigu_v2[site];
+              if(ambiguity_check_v2 == NO) state_v2 = d_state_v2[site];
             }
-      
-          for(catg=0;catg<ncatg;++catg)
-            {                                                          
-              if(ambiguity_check_v1 == NO && ambiguity_check_v2 == NO)
-                {
-                  AVX_Partial_Lk_Exex(_tPij1,state_v1,
-                                      _tPij2,state_v2,
-                                      ns,_plk0);
-                }
-              else if(ambiguity_check_v1 == YES && ambiguity_check_v2 == NO)
-                {
-                  AVX_Partial_Lk_Exin(_tPij2,state_v2,
-                                      _tPij1,plk1,_pmat1plk1,
-                                      ns,_plk0);
-                }
-              else if(ambiguity_check_v1 == NO && ambiguity_check_v2 == YES)
-                {
-                  AVX_Partial_Lk_Exin(_tPij1,state_v1,
-                                      _tPij2,plk2,_pmat2plk2,
-                                      ns,_plk0);
-                }
-              else
-                {
-                  AVX_Partial_Lk_Inin(_tPij1,plk1,_pmat1plk1,
-                                      _tPij2,plk2,_pmat2plk2,
-                                      ns,_plk0);
-                  
-                }
 
-              for(k=0;k<nblocks;++k) _mm256_store_pd(plk0+sz*k,_plk0[k]);
-              
-              _tPij1 += nsns / sz;
-              _tPij2 += nsns / sz;
-              
-              plk0 += ns;
-              plk1 += (n_v1->tax) ? 0 : ns;
-              plk2 += (n_v2->tax) ? 0 : ns;
-            }
-          
-          _tPij1 -= ncatg * nsns / sz;
-          _tPij2 -= ncatg * nsns / sz;
-   
-          plk1 += (n_v1->tax) ? ns : 0;
-          plk2 += (n_v2->tax) ? ns : 0;
+          #if PHYML_OPT_PARTIAL_LK
+            _tPij1 = (__m256d *)init_tPij1;
+            _tPij2 = (__m256d *)init_tPij2;
+            if(do_scaling) largest_p_lk = -BIG;
 
-          if(tree->scaling_method == SCALE_FAST)
-            {
-              sum_scale_v1_val = (sum_scale_v1)?(sum_scale_v1[site]):(0);
-              sum_scale_v2_val = (sum_scale_v2)?(sum_scale_v2[site]):(0);
-              sum_scale[site] = sum_scale_v1_val + sum_scale_v2_val;
-              
-              if(sum_scale[site] >= 1024)
-                {
-                  /* plk0 -= ncatgns; */
-                  /* plk1 -= (n_v1->tax) ? ns : ncatgns; */
-                  /* plk2 -= (n_v2->tax) ? ns : ncatgns; */
-                  /* PhyML_Fprintf(stderr,"\n. PARTIAL site: %d plk0: %p [%g %g %g %g] plk1: %p [%g %g %g %g] plk2: %p [%g %g %g %g]", */
-                  /*               site, */
-                  /*               plk0, */
-                  /*               plk0[0], */
-                  /*               plk0[1], */
-                  /*               plk0[2], */
-                  /*               plk0[3], */
-                  /*               plk1, */
-                  /*               plk1[0], */
-                  /*               plk1[1], */
-                  /*               plk1[2], */
-                  /*               plk1[3], */
-                  /*               plk2, */
-                  /*               plk2[0], */
-                  /*               plk2[1], */
-                  /*               plk2[2], */
-                  /*               plk2[3] */
-                  /*               ); */
-                  /* PhyML_Fprintf(stderr,"\n. PARTIAL site: %d d: %d n_v1: %d n_v2: %d",site,d->num,n_v1->num,n_v2->num); */
-                  /* PhyML_Fprintf(stderr,"\n. PARTIAL site: %d sum n: %d sum n_v1: %d sum n_v2: %d",site,sum_scale[site],sum_scale_v1_val,sum_scale_v2_val); */
-                  
-                  /* plk0 += ncatgns; */
-                  /* plk1 += (n_v1->tax) ? ns : ncatgns; */
-                  /* plk2 += (n_v2->tax) ? ns : ncatgns; */
-                  /* Exit("\n"); */
-                }
-              
-              plk0 -= ncatgns;
-              largest_p_lk = -BIG;
-              for(i=0;i<ncatgns;++i)
-                if(plk0[i] > largest_p_lk)
-                  largest_p_lk = plk0[i];
-              
-              if(largest_p_lk < INV_TWO_TO_THE_LARGE &&
-                 tree->mod->augmented == NO &&
-                 tree->apply_lk_scaling == YES)
-                {
-                  for(i=0;i<ncatgns;++i) plk0[i] *= TWO_TO_THE_LARGE;
-                  sum_scale[site] += LARGE;
-                }
-              
-              plk0 += ncatgns;
-            }
+            if(ambiguity_check_v1 == NO && ambiguity_check_v2 == NO)
+              {
+                for(catg=0;catg<ncatg;++catg)
+                  {
+                    if(do_scaling)
+                      {
+                        catg_largest_p_lk = AVX_Partial_Lk_Exex_Max(_tPij1,state_v1,
+                                                                    _tPij2,state_v2,
+                                                                    ns,_plk0);
+                        if(catg_largest_p_lk > largest_p_lk) largest_p_lk = catg_largest_p_lk;
+                      }
+                    else
+                      {
+                        AVX_Partial_Lk_Exex(_tPij1,state_v1,
+                                            _tPij2,state_v2,
+                                            ns,_plk0);
+                      }
+
+                    for(k=0;k<nblocks;++k) _mm256_store_pd(plk0+sz*k,_plk0[k]);
+
+                    _tPij1 += tmat_catg_step;
+                    _tPij2 += tmat_catg_step;
+                    plk0 += ns;
+                    plk1 += plk1_catg_step;
+                    plk2 += plk2_catg_step;
+                  }
+              }
+            else if(ambiguity_check_v1 == YES && ambiguity_check_v2 == NO)
+              {
+                for(catg=0;catg<ncatg;++catg)
+                  {
+                    if(do_scaling)
+                      {
+                        catg_largest_p_lk = AVX_Partial_Lk_Exin_Max(_tPij2,state_v2,
+                                                                    _tPij1,plk1,_pmat1plk1,
+                                                                    ns,_plk0);
+                        if(catg_largest_p_lk > largest_p_lk) largest_p_lk = catg_largest_p_lk;
+                      }
+                    else
+                      {
+                        AVX_Partial_Lk_Exin(_tPij2,state_v2,
+                                            _tPij1,plk1,_pmat1plk1,
+                                            ns,_plk0);
+                      }
+
+                    for(k=0;k<nblocks;++k) _mm256_store_pd(plk0+sz*k,_plk0[k]);
+
+                    _tPij1 += tmat_catg_step;
+                    _tPij2 += tmat_catg_step;
+                    plk0 += ns;
+                    plk1 += plk1_catg_step;
+                    plk2 += plk2_catg_step;
+                  }
+              }
+            else if(ambiguity_check_v1 == NO && ambiguity_check_v2 == YES)
+              {
+                for(catg=0;catg<ncatg;++catg)
+                  {
+                    if(do_scaling)
+                      {
+                        catg_largest_p_lk = AVX_Partial_Lk_Exin_Max(_tPij1,state_v1,
+                                                                    _tPij2,plk2,_pmat2plk2,
+                                                                    ns,_plk0);
+                        if(catg_largest_p_lk > largest_p_lk) largest_p_lk = catg_largest_p_lk;
+                      }
+                    else
+                      {
+                        AVX_Partial_Lk_Exin(_tPij1,state_v1,
+                                            _tPij2,plk2,_pmat2plk2,
+                                            ns,_plk0);
+                      }
+
+                    for(k=0;k<nblocks;++k) _mm256_store_pd(plk0+sz*k,_plk0[k]);
+
+                    _tPij1 += tmat_catg_step;
+                    _tPij2 += tmat_catg_step;
+                    plk0 += ns;
+                    plk1 += plk1_catg_step;
+                    plk2 += plk2_catg_step;
+                  }
+              }
+            else
+              {
+                for(catg=0;catg<ncatg;++catg)
+                  {
+                    if(do_scaling)
+                      {
+                        catg_largest_p_lk = AVX_Partial_Lk_Inin_Max(_tPij1,plk1,_pmat1plk1,
+                                                                    _tPij2,plk2,_pmat2plk2,
+                                                                    ns,_plk0);
+                        if(catg_largest_p_lk > largest_p_lk) largest_p_lk = catg_largest_p_lk;
+                      }
+                    else
+                      {
+                        AVX_Partial_Lk_Inin(_tPij1,plk1,_pmat1plk1,
+                                            _tPij2,plk2,_pmat2plk2,
+                                            ns,_plk0);
+                      }
+
+                    for(k=0;k<nblocks;++k) _mm256_store_pd(plk0+sz*k,_plk0[k]);
+
+                    _tPij1 += tmat_catg_step;
+                    _tPij2 += tmat_catg_step;
+                    plk0 += ns;
+                    plk1 += plk1_catg_step;
+                    plk2 += plk2_catg_step;
+                  }
+              }
+
+            plk1 += plk1_site_step;
+            plk2 += plk2_site_step;
+
+            if(scale_fast)
+              {
+                sum_scale_v1_val = (sum_scale_v1)?(sum_scale_v1[site]):(0);
+                sum_scale_v2_val = (sum_scale_v2)?(sum_scale_v2[site]):(0);
+                sum_scale[site] = sum_scale_v1_val + sum_scale_v2_val;
+                
+                if(sum_scale[site] >= 1024)
+                  {
+                    /* plk0 -= ncatgns; */
+                    /* plk1 -= (n_v1->tax) ? ns : ncatgns; */
+                    /* plk2 -= (n_v2->tax) ? ns : ncatgns; */
+                    /* PhyML_Fprintf(stderr,"\n. PARTIAL site: %d plk0: %p [%g %g %g %g] plk1: %p [%g %g %g %g] plk2: %p [%g %g %g %g]", */
+                    /*               site, */
+                    /*               plk0, */
+                    /*               plk0[0], */
+                    /*               plk0[1], */
+                    /*               plk0[2], */
+                    /*               plk0[3], */
+                    /*               plk1, */
+                    /*               plk1[0], */
+                    /*               plk1[1], */
+                    /*               plk1[2], */
+                    /*               plk1[3], */
+                    /*               plk2, */
+                    /*               plk2[0], */
+                    /*               plk2[1], */
+                    /*               plk2[2], */
+                    /*               plk2[3] */
+                    /*               ); */
+                    /* PhyML_Fprintf(stderr,"\n. PARTIAL site: %d d: %d n_v1: %d n_v2: %d",site,d->num,n_v1->num,n_v2->num); */
+                    /* PhyML_Fprintf(stderr,"\n. PARTIAL site: %d sum n: %d sum n_v1: %d sum n_v2: %d",site,sum_scale[site],sum_scale_v1_val,sum_scale_v2_val); */
+                    
+                    /* plk0 += ncatgns; */
+                    /* plk1 += (n_v1->tax) ? ns : ncatgns; */
+                    /* plk2 += (n_v2->tax) ? ns : ncatgns; */
+                    /* Exit("\n"); */
+                  }
+                
+                if(do_scaling && largest_p_lk < INV_TWO_TO_THE_LARGE &&
+                   tree->mod->augmented == NO &&
+                   tree->apply_lk_scaling == YES)
+                  {
+                    plk0 -= ncatgns;
+                    for(i=0;i<ncatgns;++i) plk0[i] *= TWO_TO_THE_LARGE;
+                    sum_scale[site] += LARGE;
+                    plk0 += ncatgns;
+                  }
+              }
+          #else
+            for(catg=0;catg<ncatg;++catg)
+              {                                                          
+                if(ambiguity_check_v1 == NO && ambiguity_check_v2 == NO)
+                  {
+                    AVX_Partial_Lk_Exex(_tPij1,state_v1,
+                                        _tPij2,state_v2,
+                                        ns,_plk0);
+                  }
+                else if(ambiguity_check_v1 == YES && ambiguity_check_v2 == NO)
+                  {
+                    AVX_Partial_Lk_Exin(_tPij2,state_v2,
+                                        _tPij1,plk1,_pmat1plk1,
+                                        ns,_plk0);
+                  }
+                else if(ambiguity_check_v1 == NO && ambiguity_check_v2 == YES)
+                  {
+                    AVX_Partial_Lk_Exin(_tPij1,state_v1,
+                                        _tPij2,plk2,_pmat2plk2,
+                                        ns,_plk0);
+                  }
+                else
+                  {
+                    AVX_Partial_Lk_Inin(_tPij1,plk1,_pmat1plk1,
+                                        _tPij2,plk2,_pmat2plk2,
+                                        ns,_plk0);
+                  }
+
+                for(k=0;k<nblocks;++k) _mm256_store_pd(plk0+sz*k,_plk0[k]);
+
+                _tPij1 += nsns / sz;
+                _tPij2 += nsns / sz;
+                plk0 += ns;
+                plk1 += (n_v1->tax) ? 0 : ns;
+                plk2 += (n_v2->tax) ? 0 : ns;
+              }
+
+            _tPij1 -= ncatg * nsns / sz;
+            _tPij2 -= ncatg * nsns / sz;
+
+            plk1 += (n_v1->tax) ? ns : 0;
+            plk2 += (n_v2->tax) ? ns : 0;
+
+            if(tree->scaling_method == SCALE_FAST)
+              {
+                sum_scale_v1_val = (sum_scale_v1)?(sum_scale_v1[site]):(0);
+                sum_scale_v2_val = (sum_scale_v2)?(sum_scale_v2[site]):(0);
+                sum_scale[site] = sum_scale_v1_val + sum_scale_v2_val;
+
+                if(sum_scale[site] >= 1024)
+                  {
+                  }
+
+                plk0 -= ncatgns;
+                largest_p_lk = -BIG;
+                for(i=0;i<ncatgns;++i)
+                  if(plk0[i] > largest_p_lk)
+                    largest_p_lk = plk0[i];
+
+                if(largest_p_lk < INV_TWO_TO_THE_LARGE &&
+                   tree->mod->augmented == NO &&
+                   tree->apply_lk_scaling == YES)
+                  {
+                    for(i=0;i<ncatgns;++i) plk0[i] *= TWO_TO_THE_LARGE;
+                    sum_scale[site] += LARGE;
+                  }
+
+                plk0 += ncatgns;
+              }
+          #endif
         }
       else
         {
           plk0 += ncatgns;
-          plk1 += (n_v1->tax) ? ns : ncatgns;
-          plk2 += (n_v2->tax) ? ns : ncatgns;          
+          plk1 += plk1_zero_wght_step;
+          plk2 += plk2_zero_wght_step;
         }
     }
 }
@@ -529,6 +1011,19 @@ void AVX_Partial_Lk_Exex(const __m256d *_tPij1, const int state1, const __m256d 
   unsigned const int sz = (int)BYTE_ALIGN / 8;
   unsigned const int nblocks = ns / sz;
   unsigned int i;
+
+#if PHYML_OPT_PARTIAL_LK
+  if(ns == 4)
+    {
+      AVX_Partial_Lk_Exex_4(_tPij1,state1,_tPij2,state2,plk0);
+      return;
+    }
+  if(ns == 20)
+    {
+      AVX_Partial_Lk_Exex_20(_tPij1,state1,_tPij2,state2,plk0);
+      return;
+    }
+#endif
 
   _tPij1 = _tPij1 + state1 * nblocks;
   _tPij2 = _tPij2 + state2 * nblocks;
@@ -556,6 +1051,19 @@ void AVX_Partial_Lk_Exin(const __m256d *_tPij1, const int state1, const __m256d 
   unsigned const int sz = (int)BYTE_ALIGN / 8;
   unsigned const int nblocks = ns / sz;
   unsigned int i;
+
+#if PHYML_OPT_PARTIAL_LK
+  if(ns == 4)
+    {
+      AVX_Partial_Lk_Exin_4(_tPij1,state1,_tPij2,_plk2,_pmat2plk2,_plk0);
+      return;
+    }
+  if(ns == 20)
+    {
+      AVX_Partial_Lk_Exin_20(_tPij1,state1,_tPij2,_plk2,_pmat2plk2,_plk0);
+      return;
+    }
+#endif
   
   _tPij1 = _tPij1 + state1 * nblocks;
   AVX_Matrix_Vect_Prod(_tPij2,_plk2,ns,_pmat2plk2);
@@ -571,6 +1079,19 @@ void AVX_Partial_Lk_Inin(const __m256d *_tPij1, const phydbl *plk1, __m256d *_pm
   unsigned int i;
   unsigned const int sz = (int)BYTE_ALIGN / 8;
   unsigned const int nblocks = ns / sz;
+
+#if PHYML_OPT_PARTIAL_LK
+  if(ns == 4)
+    {
+      AVX_Partial_Lk_Inin_4(_tPij1,plk1,_pmat1plk1,_tPij2,plk2,_pmat2plk2,_plk0);
+      return;
+    }
+  if(ns == 20)
+    {
+      AVX_Partial_Lk_Inin_20(_tPij1,plk1,_pmat1plk1,_tPij2,plk2,_pmat2plk2,_plk0);
+      return;
+    }
+#endif
 
   for(i=0;i<ns;++i) if(plk1[i] > 1.0 || plk1[i] < 1.0 || plk2[i] > 1.0 || plk2[i] < 1.0) break; 
 
@@ -631,6 +1152,43 @@ void AVX_Matrix_Vect_Prod(const __m256d *_m_transpose, const phydbl *_v, const i
 /*       _m_transpose = _m_transpose + nblocks; */
 /*     } */
 
+}
+
+//////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////
+
+static inline phydbl AVX_Vect_Max(__m256d x)
+{
+  __m128d vlow;
+  __m128d vhigh;
+  __m128d vmax;
+  __m128d high64;
+
+  vlow = _mm256_castpd256_pd128(x);
+  vhigh = _mm256_extractf128_pd(x, 1);
+  vmax = _mm_max_pd(vlow, vhigh);
+  high64 = _mm_unpackhi_pd(vmax, vmax);
+  vmax = _mm_max_sd(vmax, high64);
+
+  return _mm_cvtsd_f64(vmax);
+}
+
+//////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////
+
+static inline phydbl AVX_Vects_Max(const __m256d *x, unsigned int nblocks)
+{
+  phydbl largest_p_lk;
+  unsigned int i;
+
+  largest_p_lk = -BIG;
+  for(i=0;i<nblocks;++i)
+    {
+      const phydbl block_max = AVX_Vect_Max(x[i]);
+      if(block_max > largest_p_lk) largest_p_lk = block_max;
+    }
+
+  return largest_p_lk;
 }
 
 //////////////////////////////////////////////////////////////

@@ -17,6 +17,49 @@ the GNU public licence. See http://www.opensource.org for details.
 #endif
 #include <stdint.h>
 
+#ifndef PHYML_OPT_PARTIAL_LK
+#define PHYML_OPT_PARTIAL_LK 1
+#endif
+
+#if PHYML_OPT_PARTIAL_LK
+static inline void Partial_Lk_Inin_4(const phydbl *Pij1, const phydbl *plk1,
+                                     const phydbl *Pij2, const phydbl *plk2,
+                                     phydbl *plk0);
+static inline void Partial_Lk_Exex_4(const phydbl *Pij1, const int state1,
+                                     const phydbl *Pij2, const int state2,
+                                     phydbl *plk0);
+static inline void Partial_Lk_Exin_4(const phydbl *Pij1, const int state1,
+                                     const phydbl *Pij2, const phydbl *plk2,
+                                     phydbl *plk0);
+static inline void Partial_Lk_Inin_20(const phydbl *Pij1, const phydbl *plk1,
+                                      const phydbl *Pij2, const phydbl *plk2,
+                                      phydbl *plk0);
+static inline void Partial_Lk_Exex_20(const phydbl *Pij1, const int state1,
+                                      const phydbl *Pij2, const int state2,
+                                      phydbl *plk0);
+static inline void Partial_Lk_Exin_20(const phydbl *Pij1, const int state1,
+                                      const phydbl *Pij2, const phydbl *plk2,
+                                      phydbl *plk0);
+static inline phydbl Partial_Lk_Inin_4_Max(const phydbl *Pij1, const phydbl *plk1,
+                                           const phydbl *Pij2, const phydbl *plk2,
+                                           phydbl *plk0);
+static inline phydbl Partial_Lk_Exex_4_Max(const phydbl *Pij1, const int state1,
+                                           const phydbl *Pij2, const int state2,
+                                           phydbl *plk0);
+static inline phydbl Partial_Lk_Exin_4_Max(const phydbl *Pij1, const int state1,
+                                           const phydbl *Pij2, const phydbl *plk2,
+                                           phydbl *plk0);
+static inline phydbl Partial_Lk_Inin_20_Max(const phydbl *Pij1, const phydbl *plk1,
+                                            const phydbl *Pij2, const phydbl *plk2,
+                                            phydbl *plk0);
+static inline phydbl Partial_Lk_Exex_20_Max(const phydbl *Pij1, const int state1,
+                                            const phydbl *Pij2, const int state2,
+                                            phydbl *plk0);
+static inline phydbl Partial_Lk_Exin_20_Max(const phydbl *Pij1, const int state1,
+                                            const phydbl *Pij2, const phydbl *plk2,
+                                            phydbl *plk0);
+#endif
+
 
 
 
@@ -1661,7 +1704,264 @@ void Core_Default_Update_Partial_Lk(const t_node *n_v1, const t_node *n_v2,
                                     const int ns, const int ncatg, const int npatterns, const int apply_scaling,
                                     const phydbl *wght)
 {
+#if PHYML_OPT_PARTIAL_LK
+  unsigned int i,site,ncatgns,catg,nsns;
+  int state_v1,state_v2;
+  int ambiguity_check_v1,ambiguity_check_v2;
+  int sum_scale_v1_val, sum_scale_v2_val;
+  phydbl largest_p_lk = -BIG;
+  phydbl catg_largest_p_lk;
+  const phydbl *init_Pij1, *init_Pij2;
+  const int tax_v1 = (n_v1->tax != 0);
+  const int tax_v2 = (n_v2->tax != 0);
+  const int use_ns4 = (ns == 4);
+  const int use_ns20 = (ns == 20);
+  const int do_scaling = (apply_scaling == YES);
+  const int plk1_catg_step = (tax_v1) ? 0 : ns;
+  const int plk2_catg_step = (tax_v2) ? 0 : ns;
+  const int plk1_site_step = (tax_v1) ? ns : 0;
+  const int plk2_site_step = (tax_v2) ? ns : 0;
+  const int plk1_zero_wght_step = (tax_v1) ? ns : (ncatg * ns);
+  const int plk2_zero_wght_step = (tax_v2) ? ns : (ncatg * ns);
+  const short int *is_ambigu_v1 = (tax_v1) ? n_v1->c_seq->is_ambigu : NULL;
+  const short int *is_ambigu_v2 = (tax_v2) ? n_v2->c_seq->is_ambigu : NULL;
+  const short int *d_state_v1 = (tax_v1) ? n_v1->c_seq->d_state : NULL;
+  const short int *d_state_v2 = (tax_v2) ? n_v2->c_seq->d_state : NULL;
   
+  ncatgns = ncatg*ns;
+  nsns = ns*ns;
+  init_Pij1 = Pij1;
+  init_Pij2 = Pij2;
+  
+  /* For every site in the alignment */
+  for(site=0;site<npatterns;site++)
+    {
+      if(wght[site] > SMALL)
+        {
+          state_v1 = state_v2 = -1;
+          ambiguity_check_v1 = ambiguity_check_v2 = YES;
+          
+          if(tax_v1)
+            {
+              ambiguity_check_v1 = is_ambigu_v1[site];
+              if(ambiguity_check_v1 == NO) state_v1 = d_state_v1[site];
+            }
+          
+          if(tax_v2)
+            {
+              ambiguity_check_v2 = is_ambigu_v2[site];
+              if(ambiguity_check_v2 == NO) state_v2 = d_state_v2[site];
+            }
+          
+          Pij1 = init_Pij1;
+          Pij2 = init_Pij2;
+          if(do_scaling) largest_p_lk = -BIG;
+          
+          /* The ambiguity case is site-specific, not catg-specific. */
+          if(ambiguity_check_v1 == NO && ambiguity_check_v2 == NO)
+            {
+              for(catg=0;catg<ncatg;++catg)
+                {
+                  if(use_ns4)
+                    {
+                      if(do_scaling)
+                        {
+                          catg_largest_p_lk = Partial_Lk_Exex_4_Max(Pij1,state_v1,Pij2,state_v2,plk0);
+                          if(catg_largest_p_lk > largest_p_lk) largest_p_lk = catg_largest_p_lk;
+                        }
+                      else
+                        {
+                          Partial_Lk_Exex_4(Pij1,state_v1,Pij2,state_v2,plk0);
+                        }
+                    }
+                  else if(use_ns20)
+                    {
+                      if(do_scaling)
+                        {
+                          catg_largest_p_lk = Partial_Lk_Exex_20_Max(Pij1,state_v1,Pij2,state_v2,plk0);
+                          if(catg_largest_p_lk > largest_p_lk) largest_p_lk = catg_largest_p_lk;
+                        }
+                      else
+                        {
+                          Partial_Lk_Exex_20(Pij1,state_v1,Pij2,state_v2,plk0);
+                        }
+                    }
+                  else
+                    {
+                      Partial_Lk_Exex(Pij1,state_v1,Pij2,state_v2,ns,plk0);
+                      if(do_scaling)
+                        {
+                          for(i=0;i<ns;++i)
+                            if(plk0[i] > largest_p_lk)
+                              largest_p_lk = plk0[i];
+                        }
+                    }
+                  Pij1 += nsns;
+                  Pij2 += nsns;
+                  plk1 += plk1_catg_step;
+                  plk2 += plk2_catg_step;
+                  plk0 += ns;
+                }
+            }
+          else if(ambiguity_check_v1 == YES && ambiguity_check_v2 == NO)
+            {
+              for(catg=0;catg<ncatg;++catg)
+                {
+                  if(use_ns4)
+                    {
+                      if(do_scaling)
+                        {
+                          catg_largest_p_lk = Partial_Lk_Exin_4_Max(Pij2,state_v2,Pij1,plk1,plk0);
+                          if(catg_largest_p_lk > largest_p_lk) largest_p_lk = catg_largest_p_lk;
+                        }
+                      else
+                        {
+                          Partial_Lk_Exin_4(Pij2,state_v2,Pij1,plk1,plk0);
+                        }
+                    }
+                  else if(use_ns20)
+                    {
+                      if(do_scaling)
+                        {
+                          catg_largest_p_lk = Partial_Lk_Exin_20_Max(Pij2,state_v2,Pij1,plk1,plk0);
+                          if(catg_largest_p_lk > largest_p_lk) largest_p_lk = catg_largest_p_lk;
+                        }
+                      else
+                        {
+                          Partial_Lk_Exin_20(Pij2,state_v2,Pij1,plk1,plk0);
+                        }
+                    }
+                  else
+                    {
+                      Partial_Lk_Exin(Pij2,state_v2,Pij1,plk1,ns,plk0);
+                      if(do_scaling)
+                        {
+                          for(i=0;i<ns;++i)
+                            if(plk0[i] > largest_p_lk)
+                              largest_p_lk = plk0[i];
+                        }
+                    }
+                  Pij1 += nsns;
+                  Pij2 += nsns;
+                  plk1 += plk1_catg_step;
+                  plk2 += plk2_catg_step;
+                  plk0 += ns;
+                }
+            }
+          else if(ambiguity_check_v1 == NO && ambiguity_check_v2 == YES)
+            {
+              for(catg=0;catg<ncatg;++catg)
+                {
+                  if(use_ns4)
+                    {
+                      if(do_scaling)
+                        {
+                          catg_largest_p_lk = Partial_Lk_Exin_4_Max(Pij1,state_v1,Pij2,plk2,plk0);
+                          if(catg_largest_p_lk > largest_p_lk) largest_p_lk = catg_largest_p_lk;
+                        }
+                      else
+                        {
+                          Partial_Lk_Exin_4(Pij1,state_v1,Pij2,plk2,plk0);
+                        }
+                    }
+                  else if(use_ns20)
+                    {
+                      if(do_scaling)
+                        {
+                          catg_largest_p_lk = Partial_Lk_Exin_20_Max(Pij1,state_v1,Pij2,plk2,plk0);
+                          if(catg_largest_p_lk > largest_p_lk) largest_p_lk = catg_largest_p_lk;
+                        }
+                      else
+                        {
+                          Partial_Lk_Exin_20(Pij1,state_v1,Pij2,plk2,plk0);
+                        }
+                    }
+                  else
+                    {
+                      Partial_Lk_Exin(Pij1,state_v1,Pij2,plk2,ns,plk0);
+                      if(do_scaling)
+                        {
+                          for(i=0;i<ns;++i)
+                            if(plk0[i] > largest_p_lk)
+                              largest_p_lk = plk0[i];
+                        }
+                    }
+                  Pij1 += nsns;
+                  Pij2 += nsns;
+                  plk1 += plk1_catg_step;
+                  plk2 += plk2_catg_step;
+                  plk0 += ns;
+                }
+            }
+          else
+            {
+              for(catg=0;catg<ncatg;++catg)
+                {
+                  if(use_ns4)
+                    {
+                      if(do_scaling)
+                        {
+                          catg_largest_p_lk = Partial_Lk_Inin_4_Max(Pij1,plk1,Pij2,plk2,plk0);
+                          if(catg_largest_p_lk > largest_p_lk) largest_p_lk = catg_largest_p_lk;
+                        }
+                      else
+                        {
+                          Partial_Lk_Inin_4(Pij1,plk1,Pij2,plk2,plk0);
+                        }
+                    }
+                  else if(use_ns20)
+                    {
+                      if(do_scaling)
+                        {
+                          catg_largest_p_lk = Partial_Lk_Inin_20_Max(Pij1,plk1,Pij2,plk2,plk0);
+                          if(catg_largest_p_lk > largest_p_lk) largest_p_lk = catg_largest_p_lk;
+                        }
+                      else
+                        {
+                          Partial_Lk_Inin_20(Pij1,plk1,Pij2,plk2,plk0);
+                        }
+                    }
+                  else
+                    {
+                      Partial_Lk_Inin(Pij1,plk1,Pij2,plk2,ns,plk0);
+                      if(do_scaling)
+                        {
+                          for(i=0;i<ns;++i)
+                            if(plk0[i] > largest_p_lk)
+                              largest_p_lk = plk0[i];
+                        }
+                    }
+                  Pij1 += nsns;
+                  Pij2 += nsns;
+                  plk1 += plk1_catg_step;
+                  plk2 += plk2_catg_step;
+                  plk0 += ns;
+                }
+            }
+          
+          plk1 += plk1_site_step;
+          plk2 += plk2_site_step;
+          
+          sum_scale_v1_val = (sum_scale1)?(sum_scale1[site]):(0);
+          sum_scale_v2_val = (sum_scale2)?(sum_scale2[site]):(0);
+          sum_scale0[site] = sum_scale_v1_val + sum_scale_v2_val;
+          
+          if(do_scaling && largest_p_lk < INV_TWO_TO_THE_LARGE)
+            {
+              plk0 -= ncatgns;
+              for(i=0;i<ncatgns;++i) plk0[i] *= TWO_TO_THE_LARGE;
+              sum_scale0[site] += LARGE;
+              plk0 += ncatgns;
+            }
+        }
+      else
+        {
+          plk0 += ncatgns;
+          plk1 += plk1_zero_wght_step;
+          plk2 += plk2_zero_wght_step;
+        }
+    }
+#else
   unsigned int i,site,ncatgns,catg,nsns;
   int state_v1,state_v2;
   int ambiguity_check_v1,ambiguity_check_v2;
@@ -1763,6 +2063,7 @@ void Core_Default_Update_Partial_Lk(const t_node *n_v1, const t_node *n_v2,
           plk2 += (n_v2->tax) ? ns : ncatgns;          
         }
     }
+#endif
 }
 #endif
 
@@ -3260,10 +3561,284 @@ void Switch_Partial_Lk_Pre(t_node *a, t_node *d, t_edge *b, short int yesno, t_t
 
 //////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////
+#if PHYML_OPT_PARTIAL_LK
+static inline phydbl Partial_Lk_Max_4(const phydbl x0, const phydbl x1,
+                                      const phydbl x2, const phydbl x3)
+{
+  phydbl largest_p_lk = x0;
+
+  if(x1 > largest_p_lk) largest_p_lk = x1;
+  if(x2 > largest_p_lk) largest_p_lk = x2;
+  if(x3 > largest_p_lk) largest_p_lk = x3;
+
+  return largest_p_lk;
+}
+
+static inline int Partial_Lk_All_One_4(const phydbl *plk1, const phydbl *plk2)
+{
+  return (plk1[0] == 1.0 && plk1[1] == 1.0 && plk1[2] == 1.0 && plk1[3] == 1.0 &&
+          plk2[0] == 1.0 && plk2[1] == 1.0 && plk2[2] == 1.0 && plk2[3] == 1.0);
+}
+
+static inline phydbl Partial_Lk_Inin_4_Max(const phydbl *Pij1, const phydbl *plk1,
+                                           const phydbl *Pij2, const phydbl *plk2,
+                                           phydbl *plk0)
+{
+  if(Partial_Lk_All_One_4(plk1,plk2))
+    {
+      plk0[0] = plk0[1] = plk0[2] = plk0[3] = 1.0;
+      return 1.0;
+    }
+
+  {
+    const phydbl p10 = plk1[0], p11 = plk1[1], p12 = plk1[2], p13 = plk1[3];
+    const phydbl p20 = plk2[0], p21 = plk2[1], p22 = plk2[2], p23 = plk2[3];
+
+    const phydbl u10 = Pij1[0]*p10 + Pij1[1]*p11 + Pij1[2]*p12 + Pij1[3]*p13;
+    const phydbl u11 = Pij1[4]*p10 + Pij1[5]*p11 + Pij1[6]*p12 + Pij1[7]*p13;
+    const phydbl u12 = Pij1[8]*p10 + Pij1[9]*p11 + Pij1[10]*p12 + Pij1[11]*p13;
+    const phydbl u13 = Pij1[12]*p10 + Pij1[13]*p11 + Pij1[14]*p12 + Pij1[15]*p13;
+
+    const phydbl u20 = Pij2[0]*p20 + Pij2[1]*p21 + Pij2[2]*p22 + Pij2[3]*p23;
+    const phydbl u21 = Pij2[4]*p20 + Pij2[5]*p21 + Pij2[6]*p22 + Pij2[7]*p23;
+    const phydbl u22 = Pij2[8]*p20 + Pij2[9]*p21 + Pij2[10]*p22 + Pij2[11]*p23;
+    const phydbl u23 = Pij2[12]*p20 + Pij2[13]*p21 + Pij2[14]*p22 + Pij2[15]*p23;
+    const phydbl x0 = u10*u20;
+    const phydbl x1 = u11*u21;
+    const phydbl x2 = u12*u22;
+    const phydbl x3 = u13*u23;
+
+    plk0[0] = x0;
+    plk0[1] = x1;
+    plk0[2] = x2;
+    plk0[3] = x3;
+
+    return Partial_Lk_Max_4(x0,x1,x2,x3);
+  }
+}
+
+static inline void Partial_Lk_Inin_4(const phydbl *Pij1, const phydbl *plk1,
+                                     const phydbl *Pij2, const phydbl *plk2,
+                                     phydbl *plk0)
+{
+  Partial_Lk_Inin_4_Max(Pij1,plk1,Pij2,plk2,plk0);
+}
+
+static inline phydbl Partial_Lk_Exex_4_Max(const phydbl *Pij1, const int state1,
+                                           const phydbl *Pij2, const int state2,
+                                           phydbl *plk0)
+{
+  const phydbl x0 = Pij1[state1]      * Pij2[state2];
+  const phydbl x1 = Pij1[4 + state1]  * Pij2[4 + state2];
+  const phydbl x2 = Pij1[8 + state1]  * Pij2[8 + state2];
+  const phydbl x3 = Pij1[12 + state1] * Pij2[12 + state2];
+
+  plk0[0] = x0;
+  plk0[1] = x1;
+  plk0[2] = x2;
+  plk0[3] = x3;
+
+  return Partial_Lk_Max_4(x0,x1,x2,x3);
+}
+
+static inline void Partial_Lk_Exex_4(const phydbl *Pij1, const int state1,
+                                     const phydbl *Pij2, const int state2,
+                                     phydbl *plk0)
+{
+  Partial_Lk_Exex_4_Max(Pij1,state1,Pij2,state2,plk0);
+}
+
+static inline phydbl Partial_Lk_Exin_4_Max(const phydbl *Pij1, const int state1,
+                                           const phydbl *Pij2, const phydbl *plk2,
+                                           phydbl *plk0)
+{
+  const phydbl p20 = plk2[0], p21 = plk2[1], p22 = plk2[2], p23 = plk2[3];
+
+  const phydbl u20 = Pij2[0]*p20 + Pij2[1]*p21 + Pij2[2]*p22 + Pij2[3]*p23;
+  const phydbl u21 = Pij2[4]*p20 + Pij2[5]*p21 + Pij2[6]*p22 + Pij2[7]*p23;
+  const phydbl u22 = Pij2[8]*p20 + Pij2[9]*p21 + Pij2[10]*p22 + Pij2[11]*p23;
+  const phydbl u23 = Pij2[12]*p20 + Pij2[13]*p21 + Pij2[14]*p22 + Pij2[15]*p23;
+  const phydbl x0 = Pij1[state1]      * u20;
+  const phydbl x1 = Pij1[4 + state1]  * u21;
+  const phydbl x2 = Pij1[8 + state1]  * u22;
+  const phydbl x3 = Pij1[12 + state1] * u23;
+
+  plk0[0] = x0;
+  plk0[1] = x1;
+  plk0[2] = x2;
+  plk0[3] = x3;
+
+  return Partial_Lk_Max_4(x0,x1,x2,x3);
+}
+
+static inline void Partial_Lk_Exin_4(const phydbl *Pij1, const int state1,
+                                     const phydbl *Pij2, const phydbl *plk2,
+                                     phydbl *plk0)
+{
+  Partial_Lk_Exin_4_Max(Pij1,state1,Pij2,plk2,plk0);
+}
+
+#define PARTIAL_LK_ACC_DOT20(sum,row,plk) \
+  do { \
+    (sum) += (row)[0]  * (plk)[0];  \
+    (sum) += (row)[1]  * (plk)[1];  \
+    (sum) += (row)[2]  * (plk)[2];  \
+    (sum) += (row)[3]  * (plk)[3];  \
+    (sum) += (row)[4]  * (plk)[4];  \
+    (sum) += (row)[5]  * (plk)[5];  \
+    (sum) += (row)[6]  * (plk)[6];  \
+    (sum) += (row)[7]  * (plk)[7];  \
+    (sum) += (row)[8]  * (plk)[8];  \
+    (sum) += (row)[9]  * (plk)[9];  \
+    (sum) += (row)[10] * (plk)[10]; \
+    (sum) += (row)[11] * (plk)[11]; \
+    (sum) += (row)[12] * (plk)[12]; \
+    (sum) += (row)[13] * (plk)[13]; \
+    (sum) += (row)[14] * (plk)[14]; \
+    (sum) += (row)[15] * (plk)[15]; \
+    (sum) += (row)[16] * (plk)[16]; \
+    (sum) += (row)[17] * (plk)[17]; \
+    (sum) += (row)[18] * (plk)[18]; \
+    (sum) += (row)[19] * (plk)[19]; \
+  } while(0)
+
+static inline int Partial_Lk_All_One_20(const phydbl *plk1, const phydbl *plk2)
+{
+  return (plk1[0] == 1.0 && plk1[1] == 1.0 && plk1[2] == 1.0 && plk1[3] == 1.0 &&
+          plk1[4] == 1.0 && plk1[5] == 1.0 && plk1[6] == 1.0 && plk1[7] == 1.0 &&
+          plk1[8] == 1.0 && plk1[9] == 1.0 && plk1[10] == 1.0 && plk1[11] == 1.0 &&
+          plk1[12] == 1.0 && plk1[13] == 1.0 && plk1[14] == 1.0 && plk1[15] == 1.0 &&
+          plk1[16] == 1.0 && plk1[17] == 1.0 && plk1[18] == 1.0 && plk1[19] == 1.0 &&
+          plk2[0] == 1.0 && plk2[1] == 1.0 && plk2[2] == 1.0 && plk2[3] == 1.0 &&
+          plk2[4] == 1.0 && plk2[5] == 1.0 && plk2[6] == 1.0 && plk2[7] == 1.0 &&
+          plk2[8] == 1.0 && plk2[9] == 1.0 && plk2[10] == 1.0 && plk2[11] == 1.0 &&
+          plk2[12] == 1.0 && plk2[13] == 1.0 && plk2[14] == 1.0 && plk2[15] == 1.0 &&
+          plk2[16] == 1.0 && plk2[17] == 1.0 && plk2[18] == 1.0 && plk2[19] == 1.0);
+}
+
+static inline phydbl Partial_Lk_Inin_20_Max(const phydbl *Pij1, const phydbl *plk1,
+                                            const phydbl *Pij2, const phydbl *plk2,
+                                            phydbl *plk0)
+{
+  unsigned int i;
+  phydbl largest_p_lk;
+  const phydbl *row1 = Pij1;
+  const phydbl *row2 = Pij2;
+
+  if(Partial_Lk_All_One_20(plk1,plk2))
+    {
+      for(i=0;i<20;++i) plk0[i] = 1.0;
+      return 1.0;
+    }
+
+  largest_p_lk = -BIG;
+
+  for(i=0;i<20;++i)
+    {
+      phydbl u1 = 0.0;
+      phydbl u2 = 0.0;
+      phydbl x;
+
+      PARTIAL_LK_ACC_DOT20(u1,row1,plk1);
+      PARTIAL_LK_ACC_DOT20(u2,row2,plk2);
+
+      x = u1*u2;
+      plk0[i] = x;
+      if(x > largest_p_lk) largest_p_lk = x;
+      row1 += 20;
+      row2 += 20;
+    }
+
+  return largest_p_lk;
+}
+
+static inline void Partial_Lk_Inin_20(const phydbl *Pij1, const phydbl *plk1,
+                                      const phydbl *Pij2, const phydbl *plk2,
+                                      phydbl *plk0)
+{
+  Partial_Lk_Inin_20_Max(Pij1,plk1,Pij2,plk2,plk0);
+}
+
+static inline phydbl Partial_Lk_Exex_20_Max(const phydbl *Pij1, const int state1,
+                                            const phydbl *Pij2, const int state2,
+                                            phydbl *plk0)
+{
+  unsigned int i;
+  const phydbl *col1 = Pij1 + state1;
+  const phydbl *col2 = Pij2 + state2;
+  phydbl largest_p_lk = -BIG;
+
+  for(i=0;i<20;++i)
+    {
+      const phydbl x = col1[0]*col2[0];
+      plk0[i] = x;
+      if(x > largest_p_lk) largest_p_lk = x;
+      col1 += 20;
+      col2 += 20;
+    }
+
+  return largest_p_lk;
+}
+
+static inline void Partial_Lk_Exex_20(const phydbl *Pij1, const int state1,
+                                      const phydbl *Pij2, const int state2,
+                                      phydbl *plk0)
+{
+  Partial_Lk_Exex_20_Max(Pij1,state1,Pij2,state2,plk0);
+}
+
+static inline phydbl Partial_Lk_Exin_20_Max(const phydbl *Pij1, const int state1,
+                                            const phydbl *Pij2, const phydbl *plk2,
+                                            phydbl *plk0)
+{
+  unsigned int i;
+  const phydbl *col1 = Pij1 + state1;
+  const phydbl *row2 = Pij2;
+  phydbl largest_p_lk = -BIG;
+
+  for(i=0;i<20;++i)
+    {
+      phydbl u2 = 0.0;
+      phydbl x;
+
+      PARTIAL_LK_ACC_DOT20(u2,row2,plk2);
+
+      x = col1[0]*u2;
+      plk0[i] = x;
+      if(x > largest_p_lk) largest_p_lk = x;
+      col1 += 20;
+      row2 += 20;
+    }
+
+  return largest_p_lk;
+}
+
+static inline void Partial_Lk_Exin_20(const phydbl *Pij1, const int state1,
+                                      const phydbl *Pij2, const phydbl *plk2,
+                                      phydbl *plk0)
+{
+  Partial_Lk_Exin_20_Max(Pij1,state1,Pij2,plk2,plk0);
+}
+
+#undef PARTIAL_LK_ACC_DOT20
+#endif
 
 void Partial_Lk_Inin(const phydbl *Pij1, const phydbl *plk1, const phydbl *Pij2, const phydbl *plk2, const int ns, phydbl *plk0)
 {
   unsigned int i,j;
+
+#if PHYML_OPT_PARTIAL_LK
+  if(ns == 4)
+    {
+      Partial_Lk_Inin_4(Pij1,plk1,Pij2,plk2,plk0);
+      return;
+    }
+  if(ns == 20)
+    {
+      Partial_Lk_Inin_20(Pij1,plk1,Pij2,plk2,plk0);
+      return;
+    }
+#endif
 
   
   for(i=0;i<ns;++i) if(plk1[i] > 1.0 || plk1[i] < 1.0 || plk2[i] > 1.0 || plk2[i] < 1.0) break; 
@@ -3298,6 +3873,20 @@ void Partial_Lk_Inin(const phydbl *Pij1, const phydbl *plk1, const phydbl *Pij2,
 void Partial_Lk_Exex(const phydbl *Pij1, const int state1, const phydbl *Pij2, const int state2, const int ns, phydbl *plk0)
 {
   unsigned int i;
+
+#if PHYML_OPT_PARTIAL_LK
+  if(ns == 4)
+    {
+      Partial_Lk_Exex_4(Pij1,state1,Pij2,state2,plk0);
+      return;
+    }
+  if(ns == 20)
+    {
+      Partial_Lk_Exex_20(Pij1,state1,Pij2,state2,plk0);
+      return;
+    }
+#endif
+
   for(i=0;i<ns;++i)
     {
       plk0[i] = Pij1[state1]*Pij2[state2];
@@ -3312,6 +3901,19 @@ void Partial_Lk_Exex(const phydbl *Pij1, const int state1, const phydbl *Pij2, c
 void Partial_Lk_Exin(const phydbl *Pij1, const int state1, const phydbl *Pij2, const phydbl *plk2, const int ns, phydbl *plk0)
 {
   unsigned int i,j;
+
+#if PHYML_OPT_PARTIAL_LK
+  if(ns == 4)
+    {
+      Partial_Lk_Exin_4(Pij1,state1,Pij2,plk2,plk0);
+      return;
+    }
+  if(ns == 20)
+    {
+      Partial_Lk_Exin_20(Pij1,state1,Pij2,plk2,plk0);
+      return;
+    }
+#endif
   
   for(i=0;i<ns;++i)
     {
@@ -3399,4 +4001,3 @@ phydbl Sample_Ancestral_Trait_Contmod(t_node *a, t_node *d, phydbl t_za, phydbl 
 
 //////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////
-
