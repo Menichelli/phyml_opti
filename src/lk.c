@@ -21,6 +21,25 @@ the GNU public licence. See http://www.opensource.org for details.
 #define PHYML_OPT_PARTIAL_LK 1
 #endif
 
+#ifndef PHYML_MT_LK
+#define PHYML_MT_LK 1
+#endif
+
+#if PHYML_MT_LK && defined(_OPENMP)
+#include <omp.h>
+#define PHYML_MT_LK_RUNTIME 1
+#else
+#define PHYML_MT_LK_RUNTIME 0
+#endif
+
+#if PHYML_MT_LK_RUNTIME
+static int PhyML_Should_MT_Update_Partial_Lk(int npatterns, int ncatg, int ns)
+{
+  const long long work = (long long)npatterns * (long long)ncatg * (long long)ns;
+  return (omp_get_max_threads() > 1 && work >= 4096LL);
+}
+#endif
+
 #if PHYML_OPT_PARTIAL_LK
 static inline void Partial_Lk_Inin_4(const phydbl *Pij1, const phydbl *plk1,
                                      const phydbl *Pij2, const phydbl *plk2,
@@ -1697,6 +1716,247 @@ void Default_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
 //////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////
 
+#if PHYML_MT_LK_RUNTIME && PHYML_OPT_PARTIAL_LK
+static void Core_Default_Update_Partial_Lk_MT(const t_node *n_v1, const t_node *n_v2,
+                                              phydbl *plk0, const phydbl *plk1, const phydbl *plk2,
+                                              const phydbl *Pij1, const phydbl *Pij2,
+                                              int *sum_scale0, const int *sum_scale1, const int *sum_scale2,
+                                              const int ns, const int ncatg, const int npatterns, const int apply_scaling,
+                                              const phydbl *wght)
+{
+  const unsigned int ncatgns = (unsigned int)ncatg * (unsigned int)ns;
+  const unsigned int nsns = (unsigned int)ns * (unsigned int)ns;
+  const int tax_v1 = (n_v1->tax != 0);
+  const int tax_v2 = (n_v2->tax != 0);
+  const int use_ns4 = (ns == 4);
+  const int use_ns20 = (ns == 20);
+  const int do_scaling = (apply_scaling == YES);
+  const int plk1_catg_step = (tax_v1) ? 0 : ns;
+  const int plk2_catg_step = (tax_v2) ? 0 : ns;
+  const int plk1_site_stride = (tax_v1) ? ns : (int)ncatgns;
+  const int plk2_site_stride = (tax_v2) ? ns : (int)ncatgns;
+  const short int *is_ambigu_v1 = (tax_v1) ? n_v1->c_seq->is_ambigu : NULL;
+  const short int *is_ambigu_v2 = (tax_v2) ? n_v2->c_seq->is_ambigu : NULL;
+  const short int *d_state_v1 = (tax_v1) ? n_v1->c_seq->d_state : NULL;
+  const short int *d_state_v2 = (tax_v2) ? n_v2->c_seq->d_state : NULL;
+  const phydbl *init_Pij1 = Pij1;
+  const phydbl *init_Pij2 = Pij2;
+  int site;
+
+  #pragma omp parallel for schedule(static)
+  for(site=0;site<npatterns;++site)
+    {
+      unsigned int i,catg;
+      int state_v1,state_v2;
+      int ambiguity_check_v1,ambiguity_check_v2;
+      int sum_scale_v1_val, sum_scale_v2_val;
+      phydbl largest_p_lk = -BIG;
+      phydbl catg_largest_p_lk;
+      phydbl *site_plk0;
+      const phydbl *site_plk1,*site_plk2;
+      const phydbl *site_Pij1,*site_Pij2;
+      phydbl *catg_plk0;
+      const phydbl *catg_plk1,*catg_plk2;
+
+      if(wght[site] <= SMALL) continue;
+
+      site_plk0 = plk0 + (size_t)site * ncatgns;
+      site_plk1 = plk1 + (size_t)site * plk1_site_stride;
+      site_plk2 = plk2 + (size_t)site * plk2_site_stride;
+
+      state_v1 = state_v2 = -1;
+      ambiguity_check_v1 = ambiguity_check_v2 = YES;
+
+      if(tax_v1)
+        {
+          ambiguity_check_v1 = is_ambigu_v1[site];
+          if(ambiguity_check_v1 == NO) state_v1 = d_state_v1[site];
+        }
+
+      if(tax_v2)
+        {
+          ambiguity_check_v2 = is_ambigu_v2[site];
+          if(ambiguity_check_v2 == NO) state_v2 = d_state_v2[site];
+        }
+
+      site_Pij1 = init_Pij1;
+      site_Pij2 = init_Pij2;
+
+      for(catg=0;catg<(unsigned int)ncatg;++catg)
+        {
+          catg_plk0 = site_plk0 + catg * ns;
+          catg_plk1 = site_plk1 + catg * plk1_catg_step;
+          catg_plk2 = site_plk2 + catg * plk2_catg_step;
+
+          if(ambiguity_check_v1 == NO && ambiguity_check_v2 == NO)
+            {
+              if(use_ns4)
+                {
+                  if(do_scaling)
+                    {
+                      catg_largest_p_lk = Partial_Lk_Exex_4_Max(site_Pij1,state_v1,site_Pij2,state_v2,catg_plk0);
+                      if(catg_largest_p_lk > largest_p_lk) largest_p_lk = catg_largest_p_lk;
+                    }
+                  else
+                    {
+                      Partial_Lk_Exex_4(site_Pij1,state_v1,site_Pij2,state_v2,catg_plk0);
+                    }
+                }
+              else if(use_ns20)
+                {
+                  if(do_scaling)
+                    {
+                      catg_largest_p_lk = Partial_Lk_Exex_20_Max(site_Pij1,state_v1,site_Pij2,state_v2,catg_plk0);
+                      if(catg_largest_p_lk > largest_p_lk) largest_p_lk = catg_largest_p_lk;
+                    }
+                  else
+                    {
+                      Partial_Lk_Exex_20(site_Pij1,state_v1,site_Pij2,state_v2,catg_plk0);
+                    }
+                }
+              else
+                {
+                  Partial_Lk_Exex(site_Pij1,state_v1,site_Pij2,state_v2,ns,catg_plk0);
+                  if(do_scaling)
+                    {
+                      for(i=0;i<(unsigned int)ns;++i)
+                        if(catg_plk0[i] > largest_p_lk)
+                          largest_p_lk = catg_plk0[i];
+                    }
+                }
+            }
+          else if(ambiguity_check_v1 == YES && ambiguity_check_v2 == NO)
+            {
+              if(use_ns4)
+                {
+                  if(do_scaling)
+                    {
+                      catg_largest_p_lk = Partial_Lk_Exin_4_Max(site_Pij2,state_v2,site_Pij1,catg_plk1,catg_plk0);
+                      if(catg_largest_p_lk > largest_p_lk) largest_p_lk = catg_largest_p_lk;
+                    }
+                  else
+                    {
+                      Partial_Lk_Exin_4(site_Pij2,state_v2,site_Pij1,catg_plk1,catg_plk0);
+                    }
+                }
+              else if(use_ns20)
+                {
+                  if(do_scaling)
+                    {
+                      catg_largest_p_lk = Partial_Lk_Exin_20_Max(site_Pij2,state_v2,site_Pij1,catg_plk1,catg_plk0);
+                      if(catg_largest_p_lk > largest_p_lk) largest_p_lk = catg_largest_p_lk;
+                    }
+                  else
+                    {
+                      Partial_Lk_Exin_20(site_Pij2,state_v2,site_Pij1,catg_plk1,catg_plk0);
+                    }
+                }
+              else
+                {
+                  Partial_Lk_Exin(site_Pij2,state_v2,site_Pij1,catg_plk1,ns,catg_plk0);
+                  if(do_scaling)
+                    {
+                      for(i=0;i<(unsigned int)ns;++i)
+                        if(catg_plk0[i] > largest_p_lk)
+                          largest_p_lk = catg_plk0[i];
+                    }
+                }
+            }
+          else if(ambiguity_check_v1 == NO && ambiguity_check_v2 == YES)
+            {
+              if(use_ns4)
+                {
+                  if(do_scaling)
+                    {
+                      catg_largest_p_lk = Partial_Lk_Exin_4_Max(site_Pij1,state_v1,site_Pij2,catg_plk2,catg_plk0);
+                      if(catg_largest_p_lk > largest_p_lk) largest_p_lk = catg_largest_p_lk;
+                    }
+                  else
+                    {
+                      Partial_Lk_Exin_4(site_Pij1,state_v1,site_Pij2,catg_plk2,catg_plk0);
+                    }
+                }
+              else if(use_ns20)
+                {
+                  if(do_scaling)
+                    {
+                      catg_largest_p_lk = Partial_Lk_Exin_20_Max(site_Pij1,state_v1,site_Pij2,catg_plk2,catg_plk0);
+                      if(catg_largest_p_lk > largest_p_lk) largest_p_lk = catg_largest_p_lk;
+                    }
+                  else
+                    {
+                      Partial_Lk_Exin_20(site_Pij1,state_v1,site_Pij2,catg_plk2,catg_plk0);
+                    }
+                }
+              else
+                {
+                  Partial_Lk_Exin(site_Pij1,state_v1,site_Pij2,catg_plk2,ns,catg_plk0);
+                  if(do_scaling)
+                    {
+                      for(i=0;i<(unsigned int)ns;++i)
+                        if(catg_plk0[i] > largest_p_lk)
+                          largest_p_lk = catg_plk0[i];
+                    }
+                }
+            }
+          else
+            {
+              if(use_ns4)
+                {
+                  if(do_scaling)
+                    {
+                      catg_largest_p_lk = Partial_Lk_Inin_4_Max(site_Pij1,catg_plk1,site_Pij2,catg_plk2,catg_plk0);
+                      if(catg_largest_p_lk > largest_p_lk) largest_p_lk = catg_largest_p_lk;
+                    }
+                  else
+                    {
+                      Partial_Lk_Inin_4(site_Pij1,catg_plk1,site_Pij2,catg_plk2,catg_plk0);
+                    }
+                }
+              else if(use_ns20)
+                {
+                  if(do_scaling)
+                    {
+                      catg_largest_p_lk = Partial_Lk_Inin_20_Max(site_Pij1,catg_plk1,site_Pij2,catg_plk2,catg_plk0);
+                      if(catg_largest_p_lk > largest_p_lk) largest_p_lk = catg_largest_p_lk;
+                    }
+                  else
+                    {
+                      Partial_Lk_Inin_20(site_Pij1,catg_plk1,site_Pij2,catg_plk2,catg_plk0);
+                    }
+                }
+              else
+                {
+                  Partial_Lk_Inin(site_Pij1,catg_plk1,site_Pij2,catg_plk2,ns,catg_plk0);
+                  if(do_scaling)
+                    {
+                      for(i=0;i<(unsigned int)ns;++i)
+                        if(catg_plk0[i] > largest_p_lk)
+                          largest_p_lk = catg_plk0[i];
+                    }
+                }
+            }
+
+          site_Pij1 += nsns;
+          site_Pij2 += nsns;
+        }
+
+      sum_scale_v1_val = (sum_scale1)?(sum_scale1[site]):(0);
+      sum_scale_v2_val = (sum_scale2)?(sum_scale2[site]):(0);
+      sum_scale0[site] = sum_scale_v1_val + sum_scale_v2_val;
+
+      if(do_scaling && largest_p_lk < INV_TWO_TO_THE_LARGE)
+        {
+          for(i=0;i<ncatgns;++i) site_plk0[i] *= TWO_TO_THE_LARGE;
+          sum_scale0[site] += LARGE;
+        }
+    }
+}
+#endif
+
+//////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////
+
 void Core_Default_Update_Partial_Lk(const t_node *n_v1, const t_node *n_v2,
                                     phydbl *plk0, const phydbl *plk1, const phydbl *plk2,
                                     const phydbl *Pij1, const phydbl *Pij2,
@@ -1705,6 +1965,18 @@ void Core_Default_Update_Partial_Lk(const t_node *n_v1, const t_node *n_v2,
                                     const phydbl *wght)
 {
 #if PHYML_OPT_PARTIAL_LK
+#if PHYML_MT_LK_RUNTIME
+  if(PhyML_Should_MT_Update_Partial_Lk(npatterns,ncatg,ns))
+    {
+      Core_Default_Update_Partial_Lk_MT(n_v1,n_v2,
+                                        plk0,plk1,plk2,
+                                        Pij1,Pij2,
+                                        sum_scale0,sum_scale1,sum_scale2,
+                                        ns,ncatg,npatterns,apply_scaling,
+                                        wght);
+      return;
+    }
+#endif
   unsigned int i,site,ncatgns,catg,nsns;
   int state_v1,state_v2;
   int ambiguity_check_v1,ambiguity_check_v2;

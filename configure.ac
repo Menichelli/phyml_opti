@@ -80,6 +80,33 @@ AC_DEFINE_UNQUOTED([PHYML_OPT_PARTIAL_LK],
                    [$PHYML_OPT_PARTIAL_LK_VALUE],
                    [Enable specialized partial-likelihood scalar and SIMD optimizations.])
 
+AC_ARG_ENABLE([mt-lk],
+              [AS_HELP_STRING([--disable-mt-lk],
+                              [Disable multithreaded likelihood kernels (enabled by default).])],
+              [],
+              [enable_mt_lk=yes])
+
+MT_LK_FLAG=""
+AS_IF([test "x$enable_mt_lk" = "xno"],
+      [PHYML_MT_LK_VALUE=0],
+      [PHYML_MT_LK_VALUE=1
+       AC_MSG_CHECKING([whether $CC supports OpenMP for mt-lk])
+       save_CFLAGS="$CFLAGS"
+       CFLAGS="$CFLAGS -fopenmp"
+       AC_LINK_IFELSE(
+         [AC_LANG_PROGRAM([[#include <omp.h>]],
+                          [[int n = omp_get_max_threads(); return (n < 1);]])],
+         [AC_MSG_RESULT([yes])
+          MT_LK_FLAG="-fopenmp"],
+         [AC_MSG_RESULT([no])
+          AC_MSG_WARN([OpenMP not available, disabling multithreaded likelihood kernels.])
+          PHYML_MT_LK_VALUE=0])
+       CFLAGS="$save_CFLAGS"])
+
+AC_DEFINE_UNQUOTED([PHYML_MT_LK],
+                   [$PHYML_MT_LK_VALUE],
+                   [Enable multithreaded likelihood kernels.])
+
 
 LDFLAGS="${ARGC_flag}" 
 
@@ -89,7 +116,7 @@ dnl AC_PROG_LIBTOOL
 
 
 dnl DEFAULT_C_FLAG="-fno-inline-functions -fno-inline-functions-called-once -fno-optimize-sibling-calls -O2 -fno-omit-frame-pointer -g ${VECTOR_FLAG}"
-DEFAULT_C_FLAG="-std=c99 -O3 -fomit-frame-pointer -funroll-loops -Wall -Winline -finline ${VECTOR_FLAG}"
+DEFAULT_C_FLAG="-std=c99 -O3 -fomit-frame-pointer -funroll-loops -Wall -Winline -finline ${VECTOR_FLAG} ${MT_LK_FLAG}"
 dnl DEFAULT_C_FLAG="-O2 ${VECTOR_FLAG}"
 dnl DEFAULT_C_FLAG="${VECTOR_FLAG}"
 dnl DEFAULT_C_FLAG="-pthread  -O3 -g -ffunction-sections -fdata-sections"
@@ -98,13 +125,13 @@ AC_ARG_ENABLE([debug],
               [AS_HELP_STRING([--enable-debug],
                               [Remove optimization options and add debug informations.])])
 AS_IF([test "x$enable_debug" = "xyes"],
-      [CFLAGS="-ansi ${VECTOR_FLAG} -pedantic -Wall -std=c99 -O0 -g -Wuninitialized -Wunused -Wunreachable-code -Og"],
+      [CFLAGS="-ansi ${VECTOR_FLAG} ${MT_LK_FLAG} -pedantic -Wall -std=c99 -O0 -g -Wuninitialized -Wunused -Wunreachable-code -Og"],
       [CFLAGS="${DEFAULT_C_FLAG}"])
 
 AC_ARG_ENABLE([safemode],
         AS_HELP_STRING([--enable-safemode],[Enable safe mode.]))
 AS_IF([test "x$enable_safemode" = "xyes"],
-      [CFLAGS="-Wall -DSAFEMODE -O3 ${VECTOR_FLAG}"],
+      [CFLAGS="-Wall -DSAFEMODE -O3 ${VECTOR_FLAG} ${MT_LK_FLAG}"],
       [AS_IF([test "x$enable_debug" = "xno"],[CFLAGS="${DEFAULT_C_FLAG}"])])
 
 AC_ARG_ENABLE([gprof],
@@ -112,7 +139,7 @@ AC_ARG_ENABLE([gprof],
                               [Remove optimization options and add profiling informations.])])
 
 AS_IF([test "x$enable_gprof" = "xyes"],
-      [CFLAGS="-g -pg -fno-inline -fprofile-arcs -ftest-coverage ${VECTOR_FLAG}"],
+      [CFLAGS="-g -pg -fno-inline -fprofile-arcs -ftest-coverage ${VECTOR_FLAG} ${MT_LK_FLAG}"],
       [AS_IF([test "x$enable_debug" = "xno"],[CFLAGS="${DEFAULT_C_FLAG}"])])
 
 AC_ARG_ENABLE([phyml-mpi],

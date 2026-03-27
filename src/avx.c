@@ -19,8 +19,27 @@ the GNU public licence. See http://www.opensource.org for details.
 #define PHYML_OPT_PARTIAL_LK 1
 #endif
 
+#ifndef PHYML_MT_LK
+#define PHYML_MT_LK 1
+#endif
+
+#if PHYML_MT_LK && defined(_OPENMP)
+#include <omp.h>
+#define PHYML_MT_LK_RUNTIME 1
+#else
+#define PHYML_MT_LK_RUNTIME 0
+#endif
+
 static inline phydbl AVX_Vect_Max(__m256d x);
 static inline phydbl AVX_Vects_Max(const __m256d *x, unsigned int nblocks);
+
+#if PHYML_MT_LK_RUNTIME
+static int PhyML_Should_MT_AVX_Update_Partial_Lk(int npatterns, int ncatg, int ns)
+{
+  const long long work = (long long)npatterns * (long long)ncatg * (long long)ns;
+  return (omp_get_max_threads() > 1 && work >= 4096LL);
+}
+#endif
 
 #if PHYML_OPT_PARTIAL_LK
 static inline int AVX_All_One(const phydbl *plk, unsigned int ns)
@@ -330,6 +349,160 @@ static inline phydbl AVX_Partial_Lk_Inin_Max(const __m256d *_tPij1, const phydbl
   return largest_p_lk;
 }
 
+#if PHYML_MT_LK_RUNTIME
+static void AVX_Update_Partial_Lk_MT(t_tree *tree,
+                                     const t_node *n_v1, const t_node *n_v2,
+                                     phydbl *plk0, const phydbl *plk1, const phydbl *plk2,
+                                     int *sum_scale, const int *sum_scale_v1, const int *sum_scale_v2,
+                                     const __m256d *init_tPij1, const __m256d *init_tPij2,
+                                     const unsigned int npattern, const unsigned int ns, const unsigned int ncatg)
+{
+  const unsigned int ncatgns = ncatg * ns;
+  const unsigned int nsns = ns * ns;
+  const unsigned int sz = (unsigned int)BYTE_ALIGN / 8U;
+  const unsigned int nblocks = ns / sz;
+  const unsigned int tmat_catg_step = nsns / sz;
+  const int tax_v1 = (n_v1->tax != 0);
+  const int tax_v2 = (n_v2->tax != 0);
+  const int scale_fast = (tree->scaling_method == SCALE_FAST);
+  const int do_scaling = (scale_fast && tree->apply_lk_scaling == YES);
+  const int plk1_catg_step = (tax_v1) ? 0 : (int)ns;
+  const int plk2_catg_step = (tax_v2) ? 0 : (int)ns;
+  const int plk1_site_stride = (tax_v1) ? (int)ns : (int)ncatgns;
+  const int plk2_site_stride = (tax_v2) ? (int)ns : (int)ncatgns;
+  const short int *is_ambigu_v1 = (tax_v1) ? n_v1->c_seq->is_ambigu : NULL;
+  const short int *is_ambigu_v2 = (tax_v2) ? n_v2->c_seq->is_ambigu : NULL;
+  const short int *d_state_v1 = (tax_v1) ? n_v1->c_seq->d_state : NULL;
+  const short int *d_state_v2 = (tax_v2) ? n_v2->c_seq->d_state : NULL;
+  int site;
+
+  #pragma omp parallel for schedule(static)
+  for(site=0;site<(int)npattern;++site)
+    {
+      unsigned int catg,k;
+      short int state_v1 = -1;
+      short int state_v2 = -1;
+      short int ambiguity_check_v1 = YES;
+      short int ambiguity_check_v2 = YES;
+      phydbl largest_p_lk = -BIG;
+      phydbl catg_largest_p_lk;
+      phydbl *site_plk0;
+      const phydbl *site_plk1,*site_plk2;
+      const __m256d *site_tPij1,*site_tPij2;
+      __m256d pmat1plk1_local[nblocks];
+      __m256d pmat2plk2_local[nblocks];
+      __m256d plk0_local[nblocks];
+
+      if(tree->data->wght[site] <= SMALL) continue;
+
+      site_plk0 = plk0 + (size_t)site * ncatgns;
+      site_plk1 = plk1 + (size_t)site * plk1_site_stride;
+      site_plk2 = plk2 + (size_t)site * plk2_site_stride;
+      site_tPij1 = init_tPij1;
+      site_tPij2 = init_tPij2;
+
+      if(tax_v1)
+        {
+          ambiguity_check_v1 = is_ambigu_v1[site];
+          if(ambiguity_check_v1 == NO) state_v1 = d_state_v1[site];
+        }
+
+      if(tax_v2)
+        {
+          ambiguity_check_v2 = is_ambigu_v2[site];
+          if(ambiguity_check_v2 == NO) state_v2 = d_state_v2[site];
+        }
+
+      for(catg=0;catg<ncatg;++catg)
+        {
+          phydbl *catg_plk0 = site_plk0 + catg * ns;
+          const phydbl *catg_plk1 = site_plk1 + catg * plk1_catg_step;
+          const phydbl *catg_plk2 = site_plk2 + catg * plk2_catg_step;
+
+          if(ambiguity_check_v1 == NO && ambiguity_check_v2 == NO)
+            {
+              if(do_scaling)
+                {
+                  catg_largest_p_lk = AVX_Partial_Lk_Exex_Max(site_tPij1,state_v1,
+                                                              site_tPij2,state_v2,
+                                                              ns,plk0_local);
+                  if(catg_largest_p_lk > largest_p_lk) largest_p_lk = catg_largest_p_lk;
+                }
+              else
+                {
+                  AVX_Partial_Lk_Exex(site_tPij1,state_v1,site_tPij2,state_v2,ns,plk0_local);
+                }
+            }
+          else if(ambiguity_check_v1 == YES && ambiguity_check_v2 == NO)
+            {
+              if(do_scaling)
+                {
+                  catg_largest_p_lk = AVX_Partial_Lk_Exin_Max(site_tPij2,state_v2,
+                                                              site_tPij1,catg_plk1,pmat1plk1_local,
+                                                              ns,plk0_local);
+                  if(catg_largest_p_lk > largest_p_lk) largest_p_lk = catg_largest_p_lk;
+                }
+              else
+                {
+                  AVX_Partial_Lk_Exin(site_tPij2,state_v2,
+                                      site_tPij1,catg_plk1,pmat1plk1_local,
+                                      ns,plk0_local);
+                }
+            }
+          else if(ambiguity_check_v1 == NO && ambiguity_check_v2 == YES)
+            {
+              if(do_scaling)
+                {
+                  catg_largest_p_lk = AVX_Partial_Lk_Exin_Max(site_tPij1,state_v1,
+                                                              site_tPij2,catg_plk2,pmat2plk2_local,
+                                                              ns,plk0_local);
+                  if(catg_largest_p_lk > largest_p_lk) largest_p_lk = catg_largest_p_lk;
+                }
+              else
+                {
+                  AVX_Partial_Lk_Exin(site_tPij1,state_v1,
+                                      site_tPij2,catg_plk2,pmat2plk2_local,
+                                      ns,plk0_local);
+                }
+            }
+          else
+            {
+              if(do_scaling)
+                {
+                  catg_largest_p_lk = AVX_Partial_Lk_Inin_Max(site_tPij1,catg_plk1,pmat1plk1_local,
+                                                              site_tPij2,catg_plk2,pmat2plk2_local,
+                                                              ns,plk0_local);
+                  if(catg_largest_p_lk > largest_p_lk) largest_p_lk = catg_largest_p_lk;
+                }
+              else
+                {
+                  AVX_Partial_Lk_Inin(site_tPij1,catg_plk1,pmat1plk1_local,
+                                      site_tPij2,catg_plk2,pmat2plk2_local,
+                                      ns,plk0_local);
+                }
+            }
+
+          for(k=0;k<nblocks;++k) _mm256_store_pd(catg_plk0 + sz*k,plk0_local[k]);
+          site_tPij1 += tmat_catg_step;
+          site_tPij2 += tmat_catg_step;
+        }
+
+      if(scale_fast)
+        {
+          sum_scale[site] = (sum_scale_v1 ? sum_scale_v1[site] : 0) +
+                            (sum_scale_v2 ? sum_scale_v2[site] : 0);
+
+          if(do_scaling && largest_p_lk < INV_TWO_TO_THE_LARGE &&
+             tree->mod->augmented == NO &&
+             tree->apply_lk_scaling == YES)
+            {
+              for(k=0;k<ncatgns;++k) site_plk0[k] *= TWO_TO_THE_LARGE;
+              sum_scale[site] += LARGE;
+            }
+        }
+    }
+}
+#endif
 #endif
 
 //////////////////////////////////////////////////////////////
@@ -738,6 +911,19 @@ void AVX_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
       assert(FALSE);
     }
 
+#if PHYML_MT_LK_RUNTIME && PHYML_OPT_PARTIAL_LK
+  if(PhyML_Should_MT_AVX_Update_Partial_Lk(npattern,ncatg,ns))
+    {
+      AVX_Update_Partial_Lk_MT(tree,
+                               n_v1,n_v2,
+                               plk0,plk1,plk2,
+                               sum_scale,sum_scale_v1,sum_scale_v2,
+                               init_tPij1,init_tPij2,
+                               npattern,ns,ncatg);
+      return;
+    }
+#endif
+    
   /* For every site in the alignment */
   for(site=0;site<npattern;++site)
     {
