@@ -355,15 +355,19 @@ void Free_Edge_Pars(t_edge *b)
 void Free_Tree_Lk(t_tree *tree)
 {
   int i;
+  int thread_id;
 
   Free(tree->big_lk_array);
   Free(tree->c_lnL_sorted);
   Free(tree->cur_site_lk);
   Free(tree->old_site_lk);
+  Free(tree->site_dlnL);
   Free(tree->site_lk_cat);
   Free(tree->fact_sum_scale);
   Free(tree->unscaled_site_lk_cat);
   Free(tree->expl);
+  Free(tree->lk_wavefront_level_offsets);
+  Free(tree->lk_wavefront_jobs);
 
   for(i=0;i<3;i++) Free(tree->log_lks_aLRT[i]);
   Free(tree->log_lks_aLRT);
@@ -397,15 +401,36 @@ void Free_Tree_Lk(t_tree *tree)
       Free(tree->p_lk_extra_0);
       Free(tree->p_lk_tip_extra_0);
       
-      Free(tree->div_post_pred_extra_1);
-      Free(tree->sum_scale_cat_extra_1);
-      Free(tree->sum_scale_extra_1);
-      Free(tree->patt_id_extra_1);
-      Free(tree->p_lk_extra_1);
-      Free(tree->p_lk_tip_extra_1);
-      
-      
-      if(tree->n_root != NULL)
+	      Free(tree->div_post_pred_extra_1);
+	      Free(tree->sum_scale_cat_extra_1);
+	      Free(tree->sum_scale_extra_1);
+	      Free(tree->patt_id_extra_1);
+	      Free(tree->p_lk_extra_1);
+	      Free(tree->p_lk_tip_extra_1);
+
+	      if(tree->lk_thread_ctx)
+	        {
+	          for(thread_id=0;thread_id<tree->lk_mt_max_threads;++thread_id)
+	            {
+	              t_lk_thread_ctx *ctx = tree->lk_thread_ctx + thread_id;
+	              Free(ctx->site_lk_cat);
+	              Free(ctx->site_dot_prod);
+	              Free(ctx->p_lk_left_pi);
+#if (defined(__AVX__) || defined(__AVX2__) || defined(__SSE__) || defined(__SSE2__) || defined(__SSE3__) || defined(__ARM_NEON))
+	              Free(ctx->_tPij1);
+	              Free(ctx->_tPij2);
+	              Free(ctx->_pmat1plk1);
+	              Free(ctx->_pmat2plk2);
+	              Free(ctx->_plk0);
+	              Free(ctx->_prod_left);
+	              Free(ctx->_prod_rght);
+#endif
+	            }
+	          Free(tree->lk_thread_ctx);
+	        }
+	      
+	      
+	      if(tree->n_root != NULL)
         {
           Free_Edge_Lk_Left(tree->n_root->b[1]);
           Free_Edge_Lk_Left(tree->n_root->b[2]);

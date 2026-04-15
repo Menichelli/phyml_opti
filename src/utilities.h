@@ -682,6 +682,7 @@ typedef struct __Edge {
 
   phydbl                          *Pij_rr; /*! matrix of change probabilities and its first and secnd derivates (rate*state*state) */
   phydbl                          *tPij_rr; /*! transpose matrix of change probabilities and its first and secnd derivates (rate*state*state) */
+  phydbl                   *packed_tPij_rr; /*! SIMD-friendly copy of tPij_rr */
 #ifdef BEAGLE
   int                          Pij_rr_idx;
 #endif
@@ -759,6 +760,39 @@ typedef struct __Edge {
   
   
 }t_edge;
+
+/*!********************************************************/
+
+typedef struct __PhyML_Lk_Update_Job t_lk_update_job;
+
+/*!********************************************************/
+
+typedef struct __LikelihoodThreadCtx
+{
+  phydbl                            lnL_local;
+  phydbl                           dlnL_local;
+  int                      numerical_warning;
+  phydbl                       *site_lk_cat;
+  phydbl                     *site_dot_prod;
+  phydbl                      *p_lk_left_pi;
+#if (defined(__AVX__) || defined(__AVX2__))
+  __m256d                         *_tPij1;
+  __m256d                         *_tPij2;
+  __m256d                     *_pmat1plk1;
+  __m256d                     *_pmat2plk2;
+  __m256d                          *_plk0;
+  __m256d                     *_prod_left;
+  __m256d                     *_prod_rght;
+#elif (defined(__SSE__) || defined(__SSE2__) || defined(__SSE3__) || defined(__ARM_NEON))
+  __m128d                         *_tPij1;
+  __m128d                         *_tPij2;
+  __m128d                     *_pmat1plk1;
+  __m128d                     *_pmat2plk2;
+  __m128d                          *_plk0;
+  __m128d                     *_prod_left;
+  __m128d                     *_prod_rght;
+#endif
+} t_lk_thread_ctx;
 
 /*!********************************************************/
 
@@ -845,6 +879,8 @@ typedef struct __Tree{
   short int                   update_eigen_lr;
   int                                tip_root; /*! Index of tip node used as the root */
   phydbl                            *dot_prod;
+  short int                  eigen_pack_valid;
+  unsigned long long         eigen_pack_epoch;
 
   phydbl                                *expl;
 
@@ -858,6 +894,7 @@ typedef struct __Tree{
   phydbl                        *c_lnL_sorted; /*! used to compute c_lnL by adding sorted terms to minimize CPU errors */
   phydbl                         *cur_site_lk; /*! vector of loglikelihoods at individual sites */
   phydbl                         *old_site_lk; /*! vector of likelihoods at individual sites */
+  phydbl                           *site_dlnL; /*! per-site dlnL contribution buffer for exact MT reductions */
   phydbl                       annealing_temp; /*! annealing temperature in simulated annealing optimization algo */
   phydbl                               c_dlnL; /*! First derivative of the log-likelihood with respect to the length of a branch */
   phydbl                              c_d2lnL; /*! Second derivative of the log-likelihood with respect to the length of a branch */
@@ -869,6 +906,15 @@ typedef struct __Tree{
   phydbl                      unconstraint_lk; /*! unconstrained (or multinomial) log-likelihood  */
   phydbl                         composite_lk; /*! composite log-likelihood  */
   int                         *fact_sum_scale;
+  int                       lk_mt_max_threads;
+  t_lk_thread_ctx               *lk_thread_ctx;
+  t_lk_update_job          *lk_wavefront_jobs;
+  int                *lk_wavefront_level_offsets;
+  int                    lk_wavefront_njobs;
+  int                  lk_wavefront_nlevels;
+  int                lk_wavefront_max_width;
+  short int              lk_wavefront_valid;
+  unsigned long long lk_wavefront_signature;
   phydbl                       **log_lks_aLRT; /*! used to compute several branch supports */
   phydbl                           n_root_pos; /*! position of the root on its t_edge */
   phydbl                                 size; /*! tree size */
@@ -1182,6 +1228,7 @@ typedef struct __Model {
   int                      mod_num; /*! model number */
 
   int                 update_eigen; /*! update_eigen=1-> eigen values/vectors need to be updated */
+  unsigned long long    eigen_epoch;
 
   int                   whichmodel;
   int                  is_mixt_mod;

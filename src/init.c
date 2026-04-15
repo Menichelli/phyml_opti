@@ -144,6 +144,8 @@ void Init_Tree(t_tree *tree, int n_otu)
   tree->json_num                  = 0;
   tree->update_eigen_lr           = NO;
   tree->use_eigen_lr              = NO;
+  tree->eigen_pack_valid          = NO;
+  tree->eigen_pack_epoch          = 0ULL;
   tree->eval_alnL                 = YES;
   tree->eval_rlnL                 = YES;
   tree->eval_glnL                 = YES;
@@ -155,6 +157,13 @@ void Init_Tree(t_tree *tree, int n_otu)
   tree->fully_nni_opt             = NO;
   tree->n_tot_bl_opt              = 0;
   tree->numerical_warning         = NO;
+  tree->lk_wavefront_jobs         = NULL;
+  tree->lk_wavefront_level_offsets = NULL;
+  tree->lk_wavefront_njobs        = 0;
+  tree->lk_wavefront_nlevels      = 0;
+  tree->lk_wavefront_max_width    = 0;
+  tree->lk_wavefront_valid        = NO;
+  tree->lk_wavefront_signature    = 0ULL;
   
 #ifdef BEAGLE
   tree->b_inst                    = UNINITIALIZED;
@@ -189,6 +198,8 @@ void Init_Edge_Light(t_edge *b, int num)
   b->p_lk_loc_left        = NULL;
   b->p_lk_loc_rght        = NULL;
   b->Pij_rr               = NULL;
+  b->tPij_rr              = NULL;
+  b->packed_tPij_rr       = NULL;
   b->label                = NULL;
 
   b->pars_l               = NULL;
@@ -4006,4 +4017,3 @@ void Init_Contmod_Velocities(t_tree *tree)
 //////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////
-

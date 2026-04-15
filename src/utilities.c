@@ -1320,11 +1320,14 @@ void Share_Lk_Struct(t_tree *t_full, t_tree *t_empt)
   t_empt->unscaled_site_lk_cat = t_full->unscaled_site_lk_cat;
   t_empt->cur_site_lk          = t_full->cur_site_lk;
   t_empt->old_site_lk          = t_full->old_site_lk;
+  t_empt->site_dlnL            = t_full->site_dlnL;
   t_empt->log_lks_aLRT         = t_full->log_lks_aLRT;
   t_empt->site_lk_cat          = t_full->site_lk_cat;
   t_empt->fact_sum_scale       = t_full->fact_sum_scale;
   t_empt->dot_prod             = t_full->dot_prod;
   t_empt->expl                 = t_full->expl;
+  t_empt->lk_mt_max_threads    = t_full->lk_mt_max_threads;
+  t_empt->lk_thread_ctx        = t_full->lk_thread_ctx;
 
   for(i=0;i<2*n_otu-1;++i)
     {
@@ -1333,6 +1336,7 @@ void Share_Lk_Struct(t_tree *t_full, t_tree *t_empt)
 
       b_e->Pij_rr  = b_f->Pij_rr;
       b_e->tPij_rr = b_f->tPij_rr;
+      b_e->packed_tPij_rr = b_f->packed_tPij_rr;
 
       b_e->nni = b_f->nni;
     }
@@ -3781,6 +3785,7 @@ void Record_Model(t_mod *ori, t_mod *cpy)
   cpy->mod_num              = ori->mod_num;
   cpy->whichmodel           = ori->whichmodel;
   cpy->update_eigen         = ori->update_eigen;
+  cpy->eigen_epoch          = ori->eigen_epoch;
   cpy->ras->invar           = ori->ras->invar;
   cpy->r_mat->n_diff_rr     = ori->r_mat->n_diff_rr;
   cpy->l_min                = ori->l_min;
