@@ -29,6 +29,12 @@ the GNU public licence.  See http://www.opensource.org for details.
 
 void SSE_Update_Partial_Lk(t_tree *tree,t_edge *b_fcus,t_node *n);
 void SSE_Update_Eigen_Lr(t_edge *b, t_tree *tree);
+#if PHYML_OPT_PARTIAL_LK
+void SSE_Update_Partial_Lk_Team(t_tree *tree, t_edge *b_fcus, t_node *n, t_lk_thread_ctx *ctx);
+void SSE_Update_Partial_Lk_Wavefront_Job(t_tree *tree, t_edge *b_fcus, t_node *n, t_lk_thread_ctx *ctx);
+#endif
+void SSE_Update_Eigen_Lr_Team(t_edge *b, t_tree *tree, t_lk_thread_ctx *ctx);
+void SSE_Update_Eigen_And_Lk_Sites_Team(t_edge *b, t_tree *tree, const phydbl *expl, t_lk_thread_ctx *ctx);
 phydbl SSE_Lk_Core_One_Class_Eigen_Lr(phydbl *dot_prod, phydbl *expl, int ns);
 phydbl SSE_Lk_Core_One_Class_No_Eigen_Lr(phydbl *p_lk_left, phydbl *p_lk_rght, phydbl *Pij, phydbl *tPij, phydbl *pi, int ns, int ambiguity_check, int state);
 phydbl SSE_Lk_Core(int state, int ambiguity_check, t_edge *b, t_tree *tree);

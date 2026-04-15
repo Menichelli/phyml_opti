@@ -33,10 +33,800 @@ the GNU public licence. See http://www.opensource.org for details.
 #endif
 
 #if PHYML_MT_LK_RUNTIME
-static int PhyML_Should_MT_Update_Partial_Lk(int npatterns, int ncatg, int ns)
+typedef enum
+{
+  PHYML_MT_BACKEND_SCALAR = 0,
+  PHYML_MT_BACKEND_SSE = 1,
+  PHYML_MT_BACKEND_AVX = 2
+} t_phyml_mt_backend;
+
+typedef enum
+{
+  PHYML_MT_PHASE_WAVEFRONT = 0,
+  PHYML_MT_PHASE_PARTIAL_LK = 1,
+  PHYML_MT_PHASE_PMAT = 2,
+  PHYML_MT_PHASE_EIGEN = 3,
+  PHYML_MT_PHASE_SITE_LK = 4,
+  PHYML_MT_PHASE_DLK = 5,
+  PHYML_MT_PHASE_COUNT = 6
+} t_phyml_mt_phase;
+
+static const char *PhyML_MT_Backend_Name(t_phyml_mt_backend backend)
+{
+  switch(backend)
+    {
+    case PHYML_MT_BACKEND_AVX: return "avx";
+    case PHYML_MT_BACKEND_SSE: return "sse";
+    default: return "scalar";
+    }
+}
+
+static const char *PhyML_MT_Phase_Name(t_phyml_mt_phase phase)
+{
+  switch(phase)
+    {
+    case PHYML_MT_PHASE_WAVEFRONT: return "update_all_partial_lk";
+    case PHYML_MT_PHASE_PARTIAL_LK: return "update_partial_lk";
+    case PHYML_MT_PHASE_PMAT: return "update_pmat";
+    case PHYML_MT_PHASE_EIGEN: return "update_eigen_lr";
+    case PHYML_MT_PHASE_DLK: return "dlk";
+    default: return "site_lk";
+    }
+}
+
+static t_phyml_mt_backend PhyML_MT_Detect_Backend(const t_tree *tree)
+{
+#if ((defined(__AVX__) || defined(__AVX2__)) && !defined(DISABLE_NATIVE))
+  if(tree != NULL && (tree->mod->ns == 4 || tree->mod->ns == 20)) return PHYML_MT_BACKEND_AVX;
+#elif ((defined(__SSE__) || defined(__SSE2__) || defined(__SSE3__) || defined(__ARM_NEON)) && !defined(DISABLE_NATIVE))
+  if(tree != NULL && (tree->mod->ns == 4 || tree->mod->ns == 20)) return PHYML_MT_BACKEND_SSE;
+#endif
+  return PHYML_MT_BACKEND_SCALAR;
+}
+
+static int PhyML_MT_Force_Max_Threads(void)
+{
+  static int init = 0;
+  static int force_max = 0;
+
+  if(init == 0)
+    {
+      const char *env = getenv("PHYML_MT_LK_THREAD_MODE");
+      if(env != NULL)
+        {
+          if(env[0] == 'm' || env[0] == 'M' || env[0] == '1')
+            force_max = 1;
+        }
+
+      env = getenv("PHYML_MT_LK_FORCE_MAX_THREADS");
+      if(env != NULL && env[0] != '\0' && env[0] != '0')
+        force_max = 1;
+
+      init = 1;
+    }
+
+  return force_max;
+}
+
+static long long PhyML_MT_Min_Work_Per_Thread(t_phyml_mt_backend backend, t_phyml_mt_phase phase)
+{
+  switch(phase)
+    {
+    case PHYML_MT_PHASE_WAVEFRONT:
+      switch(backend)
+        {
+        case PHYML_MT_BACKEND_AVX: return 2500000LL;
+        case PHYML_MT_BACKEND_SSE: return 1500000LL;
+        default: return 1000000LL;
+        }
+
+    case PHYML_MT_PHASE_PARTIAL_LK:
+      switch(backend)
+        {
+        case PHYML_MT_BACKEND_AVX: return 320000LL;
+        case PHYML_MT_BACKEND_SSE: return 224000LL;
+        default: return 160000LL;
+        }
+
+    case PHYML_MT_PHASE_PMAT:
+      switch(backend)
+        {
+        case PHYML_MT_BACKEND_AVX: return 50000LL;
+        case PHYML_MT_BACKEND_SSE: return 40000LL;
+        default: return 25000LL;
+        }
+
+    case PHYML_MT_PHASE_EIGEN:
+      switch(backend)
+        {
+        case PHYML_MT_BACKEND_AVX: return 160000LL;
+        case PHYML_MT_BACKEND_SSE: return 128000LL;
+        default: return 96000LL;
+        }
+
+    case PHYML_MT_PHASE_DLK:
+      switch(backend)
+        {
+        case PHYML_MT_BACKEND_AVX: return 800000LL;
+        case PHYML_MT_BACKEND_SSE: return 640000LL;
+        default: return 480000LL;
+        }
+
+    default:
+      switch(backend)
+        {
+        case PHYML_MT_BACKEND_AVX: return 4000LL;
+        case PHYML_MT_BACKEND_SSE: return 3000LL;
+        default: return 2000LL;
+        }
+    }
+}
+
+static void PhyML_MT_Debug_Thread_Decision(t_phyml_mt_phase phase,
+                                           t_phyml_mt_backend backend,
+                                           int max_threads,
+                                           int selected_threads,
+                                           long long work,
+                                           int parallelism_cap,
+                                           long long min_work_per_thread)
+{
+  static int printed[PHYML_MT_PHASE_COUNT][3][2];
+  const char *env = getenv("PHYML_MT_LK_DEBUG_THREADS");
+  const int force_max = PhyML_MT_Force_Max_Threads();
+
+  if(env == NULL || env[0] == '\0' || env[0] == '0') return;
+  if(printed[phase][backend][force_max] == 1) return;
+  printed[phase][backend][force_max] = 1;
+
+  PhyML_Fprintf(stderr,
+                "\n. MT thread selection: phase=%s backend=%s mode=%s max=%d selected=%d work=%lld cap=%d quantum=%lld\n",
+                PhyML_MT_Phase_Name(phase),
+                PhyML_MT_Backend_Name(backend),
+                force_max ? "max" : "auto",
+                max_threads,
+                selected_threads,
+                work,
+                parallelism_cap,
+                min_work_per_thread);
+}
+
+static int PhyML_MT_Recommended_Threads(long long work,
+                                        int parallelism_cap,
+                                        t_phyml_mt_backend backend,
+                                        t_phyml_mt_phase phase)
+{
+  const int max_threads = omp_get_max_threads();
+  const long long min_work_per_thread = PhyML_MT_Min_Work_Per_Thread(backend,phase);
+  const int force_max = PhyML_MT_Force_Max_Threads();
+  int usable_max_threads = max_threads;
+  int threads;
+
+  if(max_threads <= 1)
+    {
+      PhyML_MT_Debug_Thread_Decision(phase,backend,max_threads,1,work,parallelism_cap,min_work_per_thread);
+      return 1;
+    }
+
+  if(force_max == 1)
+    {
+      PhyML_MT_Debug_Thread_Decision(phase,backend,max_threads,max_threads,work,parallelism_cap,min_work_per_thread);
+      return max_threads;
+    }
+
+  if(parallelism_cap > 0 && usable_max_threads > parallelism_cap) usable_max_threads = parallelism_cap;
+  if(usable_max_threads <= 1 || work < min_work_per_thread)
+    {
+      PhyML_MT_Debug_Thread_Decision(phase,backend,max_threads,1,work,parallelism_cap,min_work_per_thread);
+      return 1;
+    }
+
+  threads = (int)((work + min_work_per_thread - 1LL) / min_work_per_thread);
+  if(threads < 1) threads = 1;
+  if(threads > usable_max_threads) threads = usable_max_threads;
+  PhyML_MT_Debug_Thread_Decision(phase,backend,max_threads,threads,work,parallelism_cap,min_work_per_thread);
+  return threads;
+}
+
+static int PhyML_MT_Threads_Update_Partial_Lk(int npatterns, int ncatg, int ns)
+{
+  const long long work = (long long)npatterns * (long long)ncatg * (long long)ns * (long long)ns;
+  return PhyML_MT_Recommended_Threads(work,npatterns,PHYML_MT_BACKEND_SCALAR,PHYML_MT_PHASE_PARTIAL_LK);
+}
+
+static int PhyML_MT_Threads_Update_All_Partial_Lk(int njobs, int nlevels, int max_width,
+                                                  int npatterns, int ncatg, int ns,
+                                                  const t_tree *tree)
+{
+  const long long unit_work = (long long)npatterns *
+                              (long long)ncatg *
+                              (long long)ns *
+                              (long long)ns;
+  const long long work = (nlevels > 0) ? ((long long)njobs * unit_work + (long long)nlevels - 1LL) / (long long)nlevels : unit_work;
+  const t_phyml_mt_backend backend = PhyML_MT_Detect_Backend(tree);
+
+  return PhyML_MT_Recommended_Threads(work,max_width,backend,PHYML_MT_PHASE_WAVEFRONT);
+}
+
+static int PhyML_MT_Threads_Site_Lk(int npatterns, int ncatg, int ns, const t_tree *tree)
 {
   const long long work = (long long)npatterns * (long long)ncatg * (long long)ns;
-  return (omp_get_max_threads() > 1 && work >= 4096LL);
+  const t_phyml_mt_backend backend = PhyML_MT_Detect_Backend(tree);
+  return PhyML_MT_Recommended_Threads(work,npatterns,backend,PHYML_MT_PHASE_SITE_LK);
+}
+
+static int PhyML_MT_Threads_Update_PMat(int nedges, int ncatg, int ns, const t_tree *tree)
+{
+  const long long work = (long long)nedges * (long long)ncatg * (long long)ns * (long long)ns * (long long)ns;
+  const t_phyml_mt_backend backend = PhyML_MT_Detect_Backend(tree);
+  return PhyML_MT_Recommended_Threads(work,nedges,backend,PHYML_MT_PHASE_PMAT);
+}
+
+static int PhyML_MT_Threads_dLk(int npatterns, int ncatg, int ns, const t_tree *tree)
+{
+  const long long work = (long long)npatterns * (long long)ncatg * (long long)ns * (long long)ns;
+  const t_phyml_mt_backend backend = PhyML_MT_Detect_Backend(tree);
+  return PhyML_MT_Recommended_Threads(work,npatterns,backend,PHYML_MT_PHASE_DLK);
+}
+
+static int PhyML_MT_Threads_Update_Eigen_Lr(int npatterns, int ncatg, int ns, const t_tree *tree)
+{
+  const long long work = (long long)npatterns * (long long)ncatg * (long long)ns * (long long)ns;
+  const t_phyml_mt_backend backend = PhyML_MT_Detect_Backend(tree);
+  return PhyML_MT_Recommended_Threads(work,npatterns,backend,PHYML_MT_PHASE_EIGEN);
+}
+
+struct __PhyML_Lk_Update_Job
+{
+  t_edge *b;
+  t_node *d;
+  phydbl *dest_plk;
+  const phydbl *src_plk1;
+  const phydbl *src_plk2;
+  int level;
+};
+
+static t_lk_thread_ctx *PhyML_MT_Get_Thread_Ctx(t_tree *tree)
+{
+  int tid = 0;
+
+#if defined(_OPENMP)
+  tid = omp_get_thread_num();
+#endif
+
+  if(tree->lk_thread_ctx == NULL || tid >= tree->lk_mt_max_threads) return NULL;
+  return tree->lk_thread_ctx + tid;
+}
+
+static void PhyML_MT_Get_Site_Range(unsigned int nsites, unsigned int *begin, unsigned int *end)
+{
+  unsigned int tid = 0;
+  unsigned int nth = 1;
+
+#if defined(_OPENMP)
+  tid = (unsigned int)omp_get_thread_num();
+  nth = (unsigned int)omp_get_num_threads();
+#endif
+
+  *begin = (unsigned int)(((unsigned long long)nsites * tid) / nth);
+  *end   = (unsigned int)(((unsigned long long)nsites * (tid + 1U)) / nth);
+}
+
+static void PhyML_Debug_Update_Partial_Lk_Wavefront(const t_lk_update_job *jobs, int njobs, const int *level_offsets, int nlevels)
+{
+  const char *env = getenv("PHYML_MT_LK_WAVEFRONT_DEBUG");
+
+  (void)jobs;
+
+  if(env == NULL || env[0] == '\0' || env[0] == '0') return;
+
+  if(njobs > 0 && level_offsets != NULL && nlevels > 0)
+    {
+      int level;
+      int max_width = 0;
+      long long total_width = 0;
+
+      for(level=0;level<nlevels;++level)
+        {
+          const int width = level_offsets[level+1] - level_offsets[level];
+          if(width > max_width) max_width = width;
+          total_width += width;
+        }
+
+      PhyML_Fprintf(stderr,
+                    "\n. Update_Partial_Lk wavefront stats: jobs=%d levels=%d max_width=%d mean_width=%.2f barriers_before=%d barriers_after=%d\n",
+                    njobs,
+                    nlevels,
+                    max_width,
+                    (nlevels > 0) ? ((phydbl)total_width / (phydbl)nlevels) : .0,
+                    njobs,
+                    nlevels);
+    }
+}
+
+static int PhyML_Update_All_Partial_Lk_Max_Width(const int *level_offsets, int nlevels)
+{
+  int level;
+  int max_width = 0;
+
+  if(level_offsets == NULL || nlevels <= 0) return 0;
+
+  for(level=0;level<nlevels;++level)
+    {
+      const int width = level_offsets[level+1] - level_offsets[level];
+      if(width > max_width) max_width = width;
+    }
+
+  return max_width;
+}
+
+static int PhyML_MT_Collect_Warnings(t_tree *tree, int nthreads);
+static void PhyML_Update_Eigen_Lr_Team(t_edge *b, t_tree *tree, t_lk_thread_ctx *ctx);
+static void PhyML_Update_Eigen_And_Lk_Sites_Team(t_edge *b, t_tree *tree, const phydbl *expl, t_lk_thread_ctx *ctx);
+static void PhyML_Lk_Sites_Team(t_edge *b, t_tree *tree, const phydbl *expl, t_lk_thread_ctx *ctx);
+#if PHYML_MT_LK_RUNTIME && PHYML_OPT_PARTIAL_LK
+static void PhyML_Update_Partial_Lk_Team(t_tree *tree, t_edge *b, t_node *d, t_lk_thread_ctx *ctx);
+#endif
+static int PhyML_Can_Use_Update_Partial_Lk_Wavefront(const t_tree *tree);
+static void PhyML_Fill_Update_Partial_Lk_Job_Metadata(t_tree *tree, t_lk_update_job *job);
+static int PhyML_Build_Update_All_Partial_Lk_Wavefront(t_tree *tree, t_lk_update_job *jobs, int njobs, int *level_offsets);
+static void PhyML_Execute_Update_Partial_Lk_Job(t_tree *tree, t_edge *b, t_node *d, t_lk_thread_ctx *ctx);
+static void PhyML_Update_All_Partial_Lk_Wavefront_Team(t_tree *tree, const t_lk_update_job *jobs, const int *level_offsets, int nlevels, t_lk_thread_ctx *ctx);
+static void PhyML_Update_All_Partial_Lk_Wavefront_MT(t_tree *tree, const t_lk_update_job *jobs, const int *level_offsets, int nlevels, int nthreads);
+static unsigned long long PhyML_Update_All_Partial_Lk_Wavefront_Signature(const t_tree *tree);
+static void PhyML_Clear_Update_All_Partial_Lk_Wavefront_Cache(t_tree *tree);
+static int PhyML_Ensure_Update_All_Partial_Lk_Wavefront_Cache(t_tree *tree);
+#if PHYML_MT_LK_RUNTIME && PHYML_OPT_PARTIAL_LK
+static void Default_Update_Partial_Lk_Team(t_tree *tree, t_edge *b, t_node *d, t_lk_thread_ctx *ctx);
+static void Core_Default_Update_Partial_Lk_Team(const t_node *n_v1, const t_node *n_v2,
+                                                phydbl *plk0, const phydbl *plk1, const phydbl *plk2,
+                                                const phydbl *Pij1, const phydbl *Pij2,
+                                                int *sum_scale0, const int *sum_scale1, const int *sum_scale2,
+                                                const int ns, const int ncatg, const int npatterns, const int apply_scaling,
+                                                const phydbl *wght);
+#endif
+
+static t_edge *PhyML_Lk_Target_Edge(t_tree *tree)
+{
+  if(tree->n_root)
+    {
+      if(tree->ignore_root == NO)
+        return (tree->n_root->v[1]->tax == NO) ? (tree->n_root->b[2]) : (tree->n_root->b[1]);
+      else
+        return tree->e_root;
+    }
+
+  return tree->a_nodes[tree->tip_root]->b[0];
+}
+
+static void PhyML_Append_Post_Order_Jobs(t_node *a, t_node *d, t_tree *tree, t_lk_update_job *jobs, int *njobs)
+{
+  int i,dir;
+
+  dir = -1;
+  if(d->tax) return;
+
+  if(tree->n_root != NULL)
+    {
+      for(i=0;i<3;++i)
+        {
+          if(d->v[i] != a && !(a == tree->n_root && d->b[i] == tree->e_root))
+            PhyML_Append_Post_Order_Jobs(d,d->v[i],tree,jobs,njobs);
+          else
+            dir = i;
+        }
+    }
+  else
+    {
+      for(i=0;i<3;++i)
+        {
+          if(d->v[i] != a) PhyML_Append_Post_Order_Jobs(d,d->v[i],tree,jobs,njobs);
+          else dir = i;
+        }
+    }
+
+  if(tree->ignore_root == NO && d->b[dir] == tree->e_root)
+    {
+      jobs[*njobs].b = (d == tree->n_root->v[1]) ? tree->n_root->b[1] : tree->n_root->b[2];
+      jobs[*njobs].d = d;
+      ++(*njobs);
+    }
+  else
+    {
+      jobs[*njobs].b = d->b[dir];
+      jobs[*njobs].d = d;
+      ++(*njobs);
+    }
+}
+
+static void PhyML_Append_Pre_Order_Jobs(t_node *a, t_node *d, t_tree *tree, t_lk_update_job *jobs, int *njobs)
+{
+  int i;
+
+  if(d->tax) return;
+
+  if(tree->n_root)
+    {
+      for(i=0;i<3;++i)
+        {
+          if(d->v[i] != a && !(a == tree->n_root && d->b[i] == tree->e_root))
+            {
+              jobs[*njobs].b = d->b[i];
+              jobs[*njobs].d = d;
+              ++(*njobs);
+              PhyML_Append_Pre_Order_Jobs(d,d->v[i],tree,jobs,njobs);
+            }
+        }
+    }
+  else
+    {
+      for(i=0;i<3;++i)
+        {
+          if(d->v[i] != a)
+            {
+              jobs[*njobs].b = d->b[i];
+              jobs[*njobs].d = d;
+              ++(*njobs);
+              PhyML_Append_Pre_Order_Jobs(d,d->v[i],tree,jobs,njobs);
+            }
+        }
+    }
+}
+
+static int PhyML_Build_Update_All_Partial_Lk_Jobs(t_tree *tree, t_lk_update_job *jobs)
+{
+  int njobs = 0;
+
+  if(tree->n_root)
+    {
+      if(tree->ignore_root == NO)
+        {
+          PhyML_Append_Post_Order_Jobs(tree->n_root,tree->n_root->v[1],tree,jobs,&njobs);
+          PhyML_Append_Post_Order_Jobs(tree->n_root,tree->n_root->v[2],tree,jobs,&njobs);
+
+          jobs[njobs].b = tree->n_root->b[1];
+          jobs[njobs].d = tree->n_root;
+          ++njobs;
+          jobs[njobs].b = tree->n_root->b[2];
+          jobs[njobs].d = tree->n_root;
+          ++njobs;
+
+          if(tree->both_sides == YES)
+            {
+              PhyML_Append_Pre_Order_Jobs(tree->n_root,tree->n_root->v[2],tree,jobs,&njobs);
+              PhyML_Append_Pre_Order_Jobs(tree->n_root,tree->n_root->v[1],tree,jobs,&njobs);
+            }
+        }
+      else
+        {
+          PhyML_Append_Post_Order_Jobs(tree->e_root->rght,tree->e_root->left,tree,jobs,&njobs);
+          PhyML_Append_Post_Order_Jobs(tree->e_root->left,tree->e_root->rght,tree,jobs,&njobs);
+
+          if(tree->both_sides == YES)
+            {
+              PhyML_Append_Pre_Order_Jobs(tree->e_root->rght,tree->e_root->left,tree,jobs,&njobs);
+              PhyML_Append_Pre_Order_Jobs(tree->e_root->left,tree->e_root->rght,tree,jobs,&njobs);
+            }
+        }
+    }
+  else
+    {
+      PhyML_Append_Post_Order_Jobs(tree->a_nodes[tree->tip_root],tree->a_nodes[tree->tip_root]->v[0],tree,jobs,&njobs);
+      if(tree->both_sides == YES)
+        PhyML_Append_Pre_Order_Jobs(tree->a_nodes[tree->tip_root],tree->a_nodes[tree->tip_root]->v[0],tree,jobs,&njobs);
+    }
+
+  return njobs;
+}
+
+static int PhyML_Can_Use_Update_Partial_Lk_Wavefront(const t_tree *tree)
+{
+#if !PHYML_OPT_PARTIAL_LK
+  (void)tree;
+  return NO;
+#else
+  if(tree == NULL) return NO;
+  if(tree->is_mixt_tree == YES) return NO;
+  if(tree->mod->use_m4mod != NO) return NO;
+  if(tree->mod->ns != 4 && tree->mod->ns != 20) return NO;
+  if(tree->update_alias_subpatt == YES && tree->io->do_alias_subpatt == YES) return NO;
+  return YES;
+#endif
+}
+
+static void PhyML_Fill_Update_Partial_Lk_Job_Metadata(t_tree *tree, t_lk_update_job *job)
+{
+  t_node *n_v1, *n_v2;
+  phydbl *p_lk,*p_lk_v1,*p_lk_v2;
+  phydbl *Pij1,*Pij2;
+  phydbl *tPij1,*tPij2;
+  int *sum_scale, *sum_scale_v1, *sum_scale_v2;
+  int *p_lk_loc;
+
+  n_v1 = n_v2                 = NULL;
+  p_lk = p_lk_v1 = p_lk_v2    = NULL;
+  Pij1 = Pij2                 = NULL;
+  tPij1 = tPij2               = NULL;
+  sum_scale = sum_scale_v1 = sum_scale_v2 = NULL;
+  p_lk_loc                    = NULL;
+
+  Set_All_Partial_Lk(&n_v1,&n_v2,
+                     &p_lk,&sum_scale,&p_lk_loc,
+                     &Pij1,&tPij1,&p_lk_v1,&sum_scale_v1,
+                     &Pij2,&tPij2,&p_lk_v2,&sum_scale_v2,
+                     job->d,job->b,tree);
+
+  job->dest_plk = p_lk;
+  job->src_plk1 = p_lk_v1;
+  job->src_plk2 = p_lk_v2;
+  job->level = 0;
+}
+
+static int PhyML_Find_Update_Partial_Lk_Producer(const t_lk_update_job *jobs, int njobs, const phydbl *ptr)
+{
+  int i;
+
+  if(ptr == NULL) return -1;
+
+  for(i=0;i<njobs;++i)
+    if(jobs[i].dest_plk == ptr)
+      return i;
+
+  return -1;
+}
+
+static inline unsigned long long PhyML_Wavefront_Hash_Combine(unsigned long long hash, uintptr_t value)
+{
+  hash ^= (unsigned long long)value + 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2);
+  return hash;
+}
+
+static unsigned long long PhyML_Update_All_Partial_Lk_Wavefront_Signature(const t_tree *tree)
+{
+  unsigned long long signature = 1469598103934665603ULL;
+  int i;
+
+  if(tree == NULL) return 0ULL;
+
+  signature = PhyML_Wavefront_Hash_Combine(signature,(uintptr_t)tree->n_root);
+  signature = PhyML_Wavefront_Hash_Combine(signature,(uintptr_t)tree->e_root);
+  signature = PhyML_Wavefront_Hash_Combine(signature,(uintptr_t)tree->tip_root);
+  signature = PhyML_Wavefront_Hash_Combine(signature,(uintptr_t)tree->ignore_root);
+  signature = PhyML_Wavefront_Hash_Combine(signature,(uintptr_t)tree->both_sides);
+
+  for(i=0;i<2*tree->n_otu-1;++i)
+    {
+      const t_edge *edge = tree->a_edges[i];
+
+      if(edge == NULL) continue;
+
+      signature = PhyML_Wavefront_Hash_Combine(signature,(uintptr_t)edge->num);
+      signature = PhyML_Wavefront_Hash_Combine(signature,(uintptr_t)(edge->left ? edge->left->num + 1 : 0));
+      signature = PhyML_Wavefront_Hash_Combine(signature,(uintptr_t)(edge->rght ? edge->rght->num + 1 : 0));
+      signature = PhyML_Wavefront_Hash_Combine(signature,(uintptr_t)edge->p_lk_left);
+      signature = PhyML_Wavefront_Hash_Combine(signature,(uintptr_t)edge->p_lk_rght);
+      signature = PhyML_Wavefront_Hash_Combine(signature,(uintptr_t)edge->p_lk_tip_l);
+      signature = PhyML_Wavefront_Hash_Combine(signature,(uintptr_t)edge->p_lk_tip_r);
+    }
+
+  return (signature == 0ULL) ? 1ULL : signature;
+}
+
+static void PhyML_Clear_Update_All_Partial_Lk_Wavefront_Cache(t_tree *tree)
+{
+  if(tree == NULL) return;
+
+  Free(tree->lk_wavefront_level_offsets);
+  Free(tree->lk_wavefront_jobs);
+  tree->lk_wavefront_level_offsets = NULL;
+  tree->lk_wavefront_jobs = NULL;
+  tree->lk_wavefront_njobs = 0;
+  tree->lk_wavefront_nlevels = 0;
+  tree->lk_wavefront_max_width = 0;
+  tree->lk_wavefront_valid = NO;
+  tree->lk_wavefront_signature = 0ULL;
+}
+
+static int PhyML_Ensure_Update_All_Partial_Lk_Wavefront_Cache(t_tree *tree)
+{
+  unsigned long long signature;
+  int max_jobs;
+
+  if(tree == NULL) return NO;
+  signature = PhyML_Update_All_Partial_Lk_Wavefront_Signature(tree);
+  max_jobs = 8 * tree->n_otu + 8;
+
+  if(tree->lk_wavefront_valid == YES &&
+     tree->lk_wavefront_signature == signature &&
+     tree->lk_wavefront_jobs != NULL &&
+     tree->lk_wavefront_level_offsets != NULL)
+    return YES;
+
+  PhyML_Clear_Update_All_Partial_Lk_Wavefront_Cache(tree);
+
+  tree->lk_wavefront_jobs = (t_lk_update_job *)mCalloc((size_t)max_jobs,sizeof(t_lk_update_job));
+  tree->lk_wavefront_njobs = PhyML_Build_Update_All_Partial_Lk_Jobs(tree,tree->lk_wavefront_jobs);
+  assert(tree->lk_wavefront_njobs <= max_jobs);
+  if(tree->lk_wavefront_njobs <= 0)
+    {
+      PhyML_Clear_Update_All_Partial_Lk_Wavefront_Cache(tree);
+      return NO;
+    }
+
+  tree->lk_wavefront_level_offsets = (int *)mCalloc((size_t)(tree->lk_wavefront_njobs + 1),sizeof(int));
+  tree->lk_wavefront_nlevels = PhyML_Build_Update_All_Partial_Lk_Wavefront(tree,
+                                                                            tree->lk_wavefront_jobs,
+                                                                            tree->lk_wavefront_njobs,
+                                                                            tree->lk_wavefront_level_offsets);
+  tree->lk_wavefront_max_width = PhyML_Update_All_Partial_Lk_Max_Width(tree->lk_wavefront_level_offsets,
+                                                                       tree->lk_wavefront_nlevels);
+  tree->lk_wavefront_signature = signature;
+  tree->lk_wavefront_valid = YES;
+
+  PhyML_Debug_Update_Partial_Lk_Wavefront(tree->lk_wavefront_jobs,
+                                          tree->lk_wavefront_njobs,
+                                          tree->lk_wavefront_level_offsets,
+                                          tree->lk_wavefront_nlevels);
+  return YES;
+}
+
+static int PhyML_Build_Update_All_Partial_Lk_Wavefront(t_tree *tree, t_lk_update_job *jobs, int njobs, int *level_offsets)
+{
+  int *indegree;
+  int *succ_counts;
+  int *succ_offsets;
+  int *succ_next;
+  int *succ_list;
+  int *ready;
+  t_lk_update_job *sorted_jobs;
+  int total_edges = 0;
+  int i;
+  int nlevels = 0;
+  int out_idx = 0;
+  int nprocessed = 0;
+
+  indegree = (int *)mCalloc((size_t)njobs,sizeof(int));
+  succ_counts = (int *)mCalloc((size_t)njobs,sizeof(int));
+  succ_offsets = (int *)mCalloc((size_t)(njobs + 1),sizeof(int));
+  succ_next = (int *)mCalloc((size_t)njobs,sizeof(int));
+  ready = (int *)mCalloc((size_t)njobs,sizeof(int));
+  sorted_jobs = (t_lk_update_job *)mCalloc((size_t)njobs,sizeof(t_lk_update_job));
+
+  for(i=0;i<njobs;++i)
+    {
+      int prod1,prod2;
+
+      PhyML_Fill_Update_Partial_Lk_Job_Metadata(tree,jobs + i);
+      prod1 = PhyML_Find_Update_Partial_Lk_Producer(jobs,njobs,jobs[i].src_plk1);
+      prod2 = PhyML_Find_Update_Partial_Lk_Producer(jobs,njobs,jobs[i].src_plk2);
+
+      if(prod1 >= 0)
+        {
+          ++indegree[i];
+          ++succ_counts[prod1];
+          ++total_edges;
+        }
+      if(prod2 >= 0 && prod2 != prod1)
+        {
+          ++indegree[i];
+          ++succ_counts[prod2];
+          ++total_edges;
+        }
+    }
+
+  for(i=0;i<njobs;++i) succ_offsets[i+1] = succ_offsets[i] + succ_counts[i];
+  succ_list = (int *)mCalloc((size_t)MAX(total_edges,1),sizeof(int));
+  for(i=0;i<njobs;++i) succ_next[i] = succ_offsets[i];
+
+  for(i=0;i<njobs;++i)
+    {
+      int prod1 = PhyML_Find_Update_Partial_Lk_Producer(jobs,njobs,jobs[i].src_plk1);
+      int prod2 = PhyML_Find_Update_Partial_Lk_Producer(jobs,njobs,jobs[i].src_plk2);
+
+      if(prod1 >= 0) succ_list[succ_next[prod1]++] = i;
+      if(prod2 >= 0 && prod2 != prod1) succ_list[succ_next[prod2]++] = i;
+    }
+
+  while(nprocessed < njobs)
+    {
+      int ready_count = 0;
+
+      level_offsets[nlevels] = out_idx;
+      for(i=0;i<njobs;++i)
+        {
+          if(indegree[i] == 0)
+            {
+              ready[ready_count++] = i;
+              indegree[i] = -1;
+            }
+        }
+
+      if(ready_count == 0)
+        {
+          PhyML_Fprintf(stderr,"\n. Cyclic dependency detected while building partial-likelihood wavefront.\n");
+          assert(FALSE);
+        }
+
+      for(i=0;i<ready_count;++i)
+        {
+          const int job_idx = ready[i];
+          int succ_it;
+
+          jobs[job_idx].level = nlevels;
+          sorted_jobs[out_idx] = jobs[job_idx];
+          ++out_idx;
+          ++nprocessed;
+
+          for(succ_it=succ_offsets[job_idx]; succ_it<succ_offsets[job_idx+1]; ++succ_it)
+            {
+              const int succ_idx = succ_list[succ_it];
+              assert(indegree[succ_idx] > 0);
+              --indegree[succ_idx];
+            }
+        }
+
+      ++nlevels;
+    }
+
+  level_offsets[nlevels] = out_idx;
+  for(i=0;i<njobs;++i) jobs[i] = sorted_jobs[i];
+
+  Free(sorted_jobs);
+  Free(ready);
+  Free(succ_list);
+  Free(succ_next);
+  Free(succ_offsets);
+  Free(succ_counts);
+  Free(indegree);
+
+  return nlevels;
+}
+
+static void PhyML_Execute_Update_Partial_Lk_Job(t_tree *tree, t_edge *b, t_node *d, t_lk_thread_ctx *ctx)
+{
+  assert(ctx != NULL);
+
+  if(b->left == d && b->update_partial_lk_left == NO) return;
+  if(b->rght == d && b->update_partial_lk_rght == NO) return;
+  if(d->tax) return;
+
+#if PHYML_OPT_PARTIAL_LK && ((defined(__AVX__) || defined(__AVX2__)) && !defined(DISABLE_NATIVE))
+  AVX_Update_Partial_Lk_Wavefront_Job(tree,b,d,ctx);
+#elif PHYML_OPT_PARTIAL_LK && ((defined(__SSE__) || defined(__SSE2__) || defined(__SSE3__)) && !defined(DISABLE_NATIVE))
+  SSE_Update_Partial_Lk_Wavefront_Job(tree,b,d,ctx);
+#else
+  Default_Update_Partial_Lk(tree,b,d);
+#endif
+}
+
+static void PhyML_Update_All_Partial_Lk_Wavefront_Team(t_tree *tree, const t_lk_update_job *jobs, const int *level_offsets, int nlevels, t_lk_thread_ctx *ctx)
+{
+  int level;
+
+  assert(ctx != NULL);
+
+  for(level=0;level<nlevels;++level)
+    {
+      const int begin = level_offsets[level];
+      const int end = level_offsets[level+1];
+      int job;
+
+      #pragma omp for schedule(static)
+      for(job=begin;job<end;++job)
+        {
+          PhyML_Execute_Update_Partial_Lk_Job(tree,jobs[job].b,jobs[job].d,ctx);
+        }
+    }
+}
+
+static void PhyML_Update_All_Partial_Lk_Wavefront_MT(t_tree *tree, const t_lk_update_job *jobs, const int *level_offsets, int nlevels, int nthreads)
+{
+  #pragma omp parallel num_threads(nthreads)
+    {
+      t_lk_thread_ctx *ctx = PhyML_MT_Get_Thread_Ctx(tree);
+
+      assert(ctx != NULL);
+      PhyML_Update_All_Partial_Lk_Wavefront_Team(tree,jobs,level_offsets,nlevels,ctx);
+    }
 }
 #endif
 
@@ -462,6 +1252,38 @@ void Pre_Order_Lk(t_node *a, t_node *d, t_tree *tree)
 // be updates
 void Update_All_Partial_Lk(t_tree *tree)
 {
+#if PHYML_MT_LK_RUNTIME
+  if(tree->is_mixt_tree == NO &&
+     tree->lk_thread_ctx != NULL &&
+     omp_get_max_threads() > 1 &&
+     PhyML_Can_Use_Update_Partial_Lk_Wavefront(tree) == YES &&
+     tree->mod->s_opt->skip_tree_traversal == NO)
+    {
+      const int npatterns = (int)tree->n_pattern;
+      const int ncatg = (int)tree->mod->ras->n_catg;
+      const int ns = (int)tree->mod->ns;
+      int nthreads;
+
+      if(PhyML_Ensure_Update_All_Partial_Lk_Wavefront_Cache(tree) == YES)
+        {
+          nthreads = PhyML_MT_Threads_Update_All_Partial_Lk(tree->lk_wavefront_njobs,
+                                                            tree->lk_wavefront_nlevels,
+                                                            tree->lk_wavefront_max_width,
+                                                            npatterns,ncatg,ns,tree);
+
+          if(nthreads > 1)
+            {
+              PhyML_Update_All_Partial_Lk_Wavefront_MT(tree,
+                                                       tree->lk_wavefront_jobs,
+                                                       tree->lk_wavefront_level_offsets,
+                                                       tree->lk_wavefront_nlevels,
+                                                       nthreads);
+              return;
+            }
+        }
+    }
+#endif
+
   if(tree->n_root)
     {
       if(tree->ignore_root == NO)
@@ -499,6 +1321,382 @@ void Update_All_Partial_Lk(t_tree *tree)
     }
 }
 
+#if PHYML_MT_LK_RUNTIME && PHYML_OPT_PARTIAL_LK
+static void PhyML_Update_Partial_Lk_Team(t_tree *tree, t_edge *b, t_node *d, t_lk_thread_ctx *ctx)
+{
+  assert(ctx != NULL);
+
+  if(b->left == d && b->update_partial_lk_left == NO) return;
+  if(b->rght == d && b->update_partial_lk_rght == NO) return;
+
+  if(tree->is_mixt_tree)
+    {
+      #pragma omp single
+      MIXT_Update_Partial_Lk(tree,b,d);
+      return;
+    }
+
+  if((tree->io->do_alias_subpatt == YES) &&
+     (tree->update_alias_subpatt == YES))
+    {
+      #pragma omp single
+      Alias_One_Subpatt((d==b->left)?(b->rght):(b->left),d,tree);
+    }
+
+  if(d->tax) return;
+
+#ifdef BEAGLE
+  #pragma omp single
+  update_beagle_partials(tree,b,d);
+#else
+  if(tree->mod->use_m4mod == NO)
+    {
+      if(tree->mod->ns == 4 || tree->mod->ns == 20)
+        {
+#if ((defined(__AVX__) || defined(__AVX2__)) && !defined(DISABLE_NATIVE))
+          AVX_Update_Partial_Lk_Team(tree,b,d,ctx);
+          return;
+#elif ((defined(__SSE__) || defined(__SSE2__) || defined(__SSE3__)) && !defined(DISABLE_NATIVE))
+          SSE_Update_Partial_Lk_Team(tree,b,d,ctx);
+          return;
+#else
+          Default_Update_Partial_Lk_Team(tree,b,d,ctx);
+          return;
+#endif
+        }
+    }
+
+  #pragma omp single
+  Update_Partial_Lk_Generic(tree,b,d);
+#endif
+}
+#endif
+
+//////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////
+
+static void Pull_Scaling_Factors_Local(int site, phydbl *site_lk_cat, t_edge *b, t_tree *tree)
+{
+  unsigned int catg;
+  const unsigned int ncatg = tree->mod->ras->n_catg;
+  phydbl *dst = tree->unscaled_site_lk_cat + (size_t)site * ncatg;
+  int sum_scale_left_cat_local[ncatg];
+  int sum_scale_rght_cat_local[ncatg];
+
+  if(tree->apply_lk_scaling == NO)
+    {
+      tree->fact_sum_scale[site] = 0;
+      for(catg=0;catg<ncatg;++catg) dst[catg] = site_lk_cat[catg];
+      return;
+    }
+
+  switch(tree->scaling_method)
+    {
+    case SCALE_RATE_SPECIFIC:
+      {
+        int *sum_scale_left_cat,*sum_scale_rght_cat;
+        int exponent;
+        phydbl max_sum_scale,min_sum_scale;
+        phydbl sum,tmp,dum;
+
+        sum_scale_left_cat = sum_scale_left_cat_local;
+        sum_scale_rght_cat = sum_scale_rght_cat_local;
+
+        max_sum_scale =   (phydbl)BIG;
+        min_sum_scale =  -(phydbl)BIG;
+
+        for(catg=0;catg<ncatg;++catg)
+          {
+            sum_scale_left_cat[catg] =
+              (b->sum_scale_left)?
+              (b->sum_scale_left[site*ncatg+catg]):
+              (0.0);
+
+            sum_scale_rght_cat[catg] =
+              (b->sum_scale_rght)?
+              (b->sum_scale_rght[site*ncatg+catg]):
+              (0.0);
+
+            sum = sum_scale_left_cat[catg] + sum_scale_rght_cat[catg];
+            dum = log(FABS(site_lk_cat[catg]));
+
+            tmp = sum + ((phydbl)LOGBIG - dum)/(phydbl)LOG2;
+            if(tmp < max_sum_scale) max_sum_scale = tmp;
+
+            tmp = sum + ((phydbl)LOGSMALL - dum)/(phydbl)LOG2;
+            if(tmp > min_sum_scale) min_sum_scale = tmp;
+          }
+
+        if(min_sum_scale > max_sum_scale) min_sum_scale = max_sum_scale;
+
+        tree->fact_sum_scale[site] = (int)((max_sum_scale + min_sum_scale) / 2);
+
+        for(catg=0;catg<ncatg;++catg)
+          {
+            exponent = -(sum_scale_left_cat[catg]+sum_scale_rght_cat[catg])+tree->fact_sum_scale[site];
+            Rate_Correction(exponent,site_lk_cat + catg);
+          }
+        break;
+      }
+
+    case SCALE_FAST:
+      {
+        const int sum_scale_left =
+          (b->sum_scale_left)?
+          (b->sum_scale_left[site]):
+          (0.0);
+        const int sum_scale_rght =
+          (b->sum_scale_rght)?
+          (b->sum_scale_rght[site]):
+          (0.0);
+
+        tree->fact_sum_scale[site] = sum_scale_left + sum_scale_rght;
+        break;
+      }
+
+    default:
+      {
+        assert(FALSE);
+        break;
+      }
+    }
+
+  for(catg=0;catg<ncatg;++catg) dst[catg] = site_lk_cat[catg];
+}
+
+static phydbl Lk_Site_No_Eigen_Local(unsigned int site,
+                                     int state, int ambiguity_check,
+                                     const phydbl *p_lk_left, const phydbl *p_lk_rght,
+                                     const phydbl *Pij_rr, const phydbl *tPij_rr,
+                                     t_edge *b, t_tree *tree,
+                                     phydbl *site_lk_cat_local,
+                                     int *numerical_warning)
+{
+  phydbl site_lk,log_site_lk;
+  const phydbl *pi = tree->mod->e_frq->pi->v;
+  const phydbl *site_lk_cat_ptr;
+  const unsigned int ns = tree->mod->ns;
+  const unsigned int ncatg = tree->mod->ras->n_catg;
+  const unsigned int nsns = ns * ns;
+  unsigned int catg;
+
+  if(tree->mod->s_opt->skip_tree_traversal == NO)
+    {
+      const phydbl *catg_p_lk_left = p_lk_left;
+      const phydbl *catg_p_lk_rght = p_lk_rght;
+      const phydbl *catg_Pij_rr = Pij_rr;
+      const phydbl *catg_tPij_rr = tPij_rr;
+
+      for(catg=0;catg<ncatg;++catg)
+        {
+          if(ns == 4 || ns == 20)
+            {
+#if ((defined(__AVX__) || defined(__AVX2__)) && !defined(DISABLE_NATIVE))
+              site_lk_cat_local[catg] = AVX_Lk_Core_One_Class_No_Eigen_Lr(catg_p_lk_left,catg_p_lk_rght,catg_Pij_rr,catg_tPij_rr,pi,ns,ambiguity_check,state);
+#elif ((defined(__SSE__) || defined(__SSE2__) || defined(__SSE3__)) && !defined(DISABLE_NATIVE))
+              site_lk_cat_local[catg] = SSE_Lk_Core_One_Class_No_Eigen_Lr((phydbl *)catg_p_lk_left,(phydbl *)catg_p_lk_rght,(phydbl *)catg_Pij_rr,(phydbl *)catg_tPij_rr,(phydbl *)pi,ns,ambiguity_check,state);
+#else
+              site_lk_cat_local[catg] = Lk_Core_One_Class_No_Eigen_Lr((phydbl *)catg_p_lk_left,(phydbl *)catg_p_lk_rght,(phydbl *)catg_Pij_rr,(phydbl *)pi,ns,ambiguity_check,state);
+#endif
+            }
+          else
+            {
+              site_lk_cat_local[catg] = Lk_Core_One_Class_No_Eigen_Lr((phydbl *)catg_p_lk_left,(phydbl *)catg_p_lk_rght,(phydbl *)catg_Pij_rr,(phydbl *)pi,ns,ambiguity_check,state);
+            }
+
+          catg_Pij_rr += nsns;
+          catg_tPij_rr += nsns;
+          if(b->left->tax == NO) catg_p_lk_left += ns;
+          if(b->rght->tax == NO) catg_p_lk_rght += ns;
+        }
+
+      Pull_Scaling_Factors_Local((int)site,site_lk_cat_local,b,tree);
+    }
+
+  site_lk_cat_ptr = tree->unscaled_site_lk_cat + (size_t)site * ncatg;
+  site_lk = .0;
+  for(catg=0;catg<ncatg;++catg) site_lk += site_lk_cat_ptr[catg] * tree->mod->ras->gamma_r_proba->v[catg];
+
+  if(tree->mod->ras->invar == YES)
+    {
+      int num_prec_issue = NO;
+      phydbl inv_site_lk = Invariant_Lk(tree->fact_sum_scale[site],site,&num_prec_issue,tree);
+
+      switch(num_prec_issue)
+        {
+        case YES:
+          tree->fact_sum_scale[site] = 0;
+          inv_site_lk = Invariant_Lk(0,site,&num_prec_issue,tree);
+          site_lk = inv_site_lk * tree->mod->ras->pinvar->v;
+          break;
+
+        case NO:
+          site_lk = site_lk * (1. - tree->mod->ras->pinvar->v) + inv_site_lk * tree->mod->ras->pinvar->v;
+          break;
+        }
+    }
+
+  if(site_lk < SMALL)
+    {
+      site_lk = SMALL;
+      *numerical_warning = YES;
+    }
+
+  log_site_lk = log(site_lk) - (phydbl)LOG2 * tree->fact_sum_scale[site];
+  tree->c_lnL_sorted[site] = log_site_lk;
+  tree->cur_site_lk[site] = exp(log_site_lk);
+  return log_site_lk;
+}
+
+phydbl Lk_Site_Eigen_Local(unsigned int site,
+                           const phydbl *expl, const phydbl *dot_prod,
+                           t_edge *b, t_tree *tree,
+                           phydbl *site_lk_cat_local,
+                           int *numerical_warning)
+{
+  phydbl site_lk,log_site_lk;
+  const phydbl *site_lk_cat_ptr;
+  const unsigned int ns = tree->mod->ns;
+  const unsigned int ncatg = tree->mod->ras->n_catg;
+  unsigned int catg;
+
+  if(tree->mod->s_opt->skip_tree_traversal == NO)
+    {
+      const phydbl *catg_dot_prod = dot_prod;
+      const phydbl *catg_expl = expl;
+
+      for(catg=0;catg<ncatg;++catg)
+        {
+          if(tree->mod->io->datatype == NT || tree->mod->io->datatype == AA)
+            {
+#if ((defined(__AVX__) || defined(__AVX2__)) && !defined(DISABLE_NATIVE))
+              site_lk_cat_local[catg] = AVX_Lk_Core_One_Class_Eigen_Lr((phydbl *)catg_dot_prod,(phydbl *)(catg_expl ? catg_expl : NULL),ns);
+#elif ((defined(__SSE__) || defined(__SSE2__) || defined(__SSE3__)) && !defined(DISABLE_NATIVE))
+              site_lk_cat_local[catg] = SSE_Lk_Core_One_Class_Eigen_Lr((phydbl *)catg_dot_prod,(phydbl *)(catg_expl ? catg_expl : NULL),ns);
+#else
+              site_lk_cat_local[catg] = Lk_Core_One_Class_Eigen_Lr((phydbl *)catg_dot_prod,(phydbl *)(catg_expl ? catg_expl : NULL),ns);
+#endif
+            }
+          else
+            {
+              site_lk_cat_local[catg] = Lk_Core_One_Class_Eigen_Lr((phydbl *)catg_dot_prod,(phydbl *)(catg_expl ? catg_expl : NULL),ns);
+            }
+
+          catg_dot_prod += ns;
+          if(catg_expl) catg_expl += ns;
+        }
+
+      Pull_Scaling_Factors_Local((int)site,site_lk_cat_local,b,tree);
+    }
+
+  site_lk_cat_ptr = tree->unscaled_site_lk_cat + (size_t)site * ncatg;
+  site_lk = .0;
+  for(catg=0;catg<ncatg;++catg) site_lk += site_lk_cat_ptr[catg] * tree->mod->ras->gamma_r_proba->v[catg];
+
+  if(tree->mod->ras->invar == YES)
+    {
+      int num_prec_issue = NO;
+      phydbl inv_site_lk = Invariant_Lk(tree->fact_sum_scale[site],site,&num_prec_issue,tree);
+
+      switch(num_prec_issue)
+        {
+        case YES:
+          tree->fact_sum_scale[site] = 0;
+          inv_site_lk = Invariant_Lk(0,site,&num_prec_issue,tree);
+          site_lk = inv_site_lk * tree->mod->ras->pinvar->v;
+          break;
+
+        case NO:
+          site_lk = site_lk * (1. - tree->mod->ras->pinvar->v) + inv_site_lk * tree->mod->ras->pinvar->v;
+          break;
+        }
+    }
+
+  if(site_lk < SMALL)
+    {
+      site_lk = SMALL;
+      *numerical_warning = YES;
+    }
+
+  log_site_lk = log(site_lk) - (phydbl)LOG2 * tree->fact_sum_scale[site];
+  tree->c_lnL_sorted[site] = log_site_lk;
+  tree->cur_site_lk[site] = exp(log_site_lk);
+  return log_site_lk;
+}
+
+static void Lk_dLk_Site_Eigen_Local(unsigned int site,
+                                    const phydbl *expl, const phydbl *dot_prod,
+                                    t_edge *b, t_tree *tree,
+                                    phydbl *site_lk_cat_local,
+                                    int *numerical_warning,
+                                    phydbl *lk, phydbl *dlk)
+{
+  unsigned int catg;
+  const unsigned int ns = tree->mod->ns;
+  const unsigned int ncatg = tree->mod->ras->n_catg;
+  const phydbl *catg_dot_prod = dot_prod;
+  const phydbl *catg_expl = expl;
+
+  *lk = *dlk = 0.0;
+
+  if(tree->mod->s_opt->skip_tree_traversal == NO)
+    {
+      for(catg=0;catg<ncatg;++catg)
+        {
+          phydbl core_lk,core_dlk;
+
+          if(tree->mod->io->datatype == NT || tree->mod->io->datatype == AA)
+            {
+#if ((defined(__AVX__) || defined(__AVX2__)) && !defined(DISABLE_NATIVE))
+              AVX_Lk_dLk_Core_One_Class_Eigen_Lr((phydbl *)catg_dot_prod,(phydbl *)(catg_expl ? catg_expl : NULL),ns,&core_lk,&core_dlk);
+#elif ((defined(__SSE__) || defined(__SSE2__) || defined(__SSE3__)) && !defined(DISABLE_NATIVE))
+              SSE_Lk_dLk_Core_One_Class_Eigen_Lr((phydbl *)catg_dot_prod,(phydbl *)(catg_expl ? catg_expl : NULL),ns,&core_lk,&core_dlk);
+#else
+              Lk_dLk_Core_One_Class_Eigen_Lr((phydbl *)catg_dot_prod,(phydbl *)(catg_expl ? catg_expl : NULL),ns,&core_lk,&core_dlk);
+#endif
+            }
+          else
+            {
+              Lk_dLk_Core_One_Class_Eigen_Lr((phydbl *)catg_dot_prod,(phydbl *)(catg_expl ? catg_expl : NULL),ns,&core_lk,&core_dlk);
+            }
+
+          site_lk_cat_local[catg] = core_lk;
+          *lk  += core_lk  * tree->mod->ras->gamma_r_proba->v[catg];
+          *dlk += core_dlk * tree->mod->ras->gamma_r_proba->v[catg];
+
+          catg_dot_prod += ns;
+          if(catg_expl) catg_expl += 2*ns;
+        }
+
+      Pull_Scaling_Factors_Local((int)site,site_lk_cat_local,b,tree);
+    }
+
+  if(tree->mod->ras->invar == YES)
+    {
+      int num_prec_issue = NO;
+      phydbl inv_site_lk = Invariant_Lk(tree->fact_sum_scale[site],site,&num_prec_issue,tree);
+
+      switch(num_prec_issue)
+        {
+        case YES:
+          *lk = inv_site_lk * tree->mod->ras->pinvar->v;
+          *dlk = 0.0;
+          break;
+
+        case NO:
+          *lk = *lk * (1. - tree->mod->ras->pinvar->v) + inv_site_lk * tree->mod->ras->pinvar->v;
+          *dlk = *dlk * (1. - tree->mod->ras->pinvar->v);
+          break;
+        }
+    }
+
+  if(*lk < SMALL)
+    {
+      *lk = SMALL;
+      *numerical_warning = YES;
+    }
+}
+
 //////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////
 
@@ -511,6 +1709,12 @@ phydbl Lk(t_edge *b, t_tree *tree)
   const unsigned int ncatg = tree->mod->ras->n_catg;
   const unsigned int npatterns = tree->n_pattern;
   const unsigned int nsncatg = ns * ncatg;
+  int partial_mt_threads = 1;
+#if PHYML_MT_LK_RUNTIME
+  int pmat_mt_threads = 1;
+  int lk_mt_threads = 1;
+  int eigen_mt_threads = 1;
+#endif
 
   
   tree->numerical_warning = NO;
@@ -561,9 +1765,28 @@ phydbl Lk(t_edge *b, t_tree *tree)
     {
       if(!b) //Update PMat for all edges
         {
-          for(br=0;br<2*tree->n_otu-3;++br)
+#if PHYML_MT_LK_RUNTIME
+          if(tree->lk_thread_ctx != NULL && omp_get_max_threads() > 1)
             {
-              Update_PMat_At_Given_Edge(tree->a_edges[br],tree);
+              const int npmat_edges = (2 * tree->n_otu - 3) +
+                ((tree->n_root && tree->ignore_root == NO) ? 2 : 0);
+              pmat_mt_threads = PhyML_MT_Threads_Update_PMat(npmat_edges,(int)ncatg,(int)ns,tree);
+            }
+#endif
+          if(pmat_mt_threads > 1)
+            {
+              #pragma omp parallel for schedule(static) num_threads(pmat_mt_threads)
+              for(br=0;br<2*tree->n_otu-3;++br)
+                {
+                  Update_PMat_At_Given_Edge(tree->a_edges[br],tree);
+                }
+            }
+          else
+            {
+              for(br=0;br<2*tree->n_otu-3;++br)
+                {
+                  Update_PMat_At_Given_Edge(tree->a_edges[br],tree);
+                }
             }
           
           if(tree->n_root && tree->ignore_root == NO)
@@ -591,39 +1814,59 @@ phydbl Lk(t_edge *b, t_tree *tree)
       
       if(!b)
         {
-          if(tree->n_root != NULL)
+#if PHYML_MT_LK_RUNTIME
+          if(tree->lk_thread_ctx != NULL &&
+             omp_get_max_threads() > 1 &&
+             PhyML_Can_Use_Update_Partial_Lk_Wavefront(tree) == YES)
             {
-              if(tree->ignore_root == NO)
+              if(PhyML_Ensure_Update_All_Partial_Lk_Wavefront_Cache(tree) == YES)
                 {
-                  Post_Order_Lk(tree->n_root,tree->n_root->v[1],tree);
-                  Post_Order_Lk(tree->n_root,tree->n_root->v[2],tree);
-                  
-                  Update_Partial_Lk(tree,tree->n_root->b[1],tree->n_root);
-                  Update_Partial_Lk(tree,tree->n_root->b[2],tree->n_root);
-                  
-                  if(tree->both_sides == YES)
+                  partial_mt_threads = PhyML_MT_Threads_Update_All_Partial_Lk(tree->lk_wavefront_njobs,
+                                                                              tree->lk_wavefront_nlevels,
+                                                                              tree->lk_wavefront_max_width,
+                                                                              (int)npatterns,
+                                                                              (int)ncatg,
+                                                                              (int)ns,
+                                                                              tree);
+                }
+            }
+#endif
+          if(partial_mt_threads <= 1)
+            {
+              if(tree->n_root != NULL)
+                {
+                  if(tree->ignore_root == NO)
                     {
-                      Pre_Order_Lk(tree->n_root,tree->n_root->v[2],tree);
-                      Pre_Order_Lk(tree->n_root,tree->n_root->v[1],tree);
+                      Post_Order_Lk(tree->n_root,tree->n_root->v[1],tree);
+                      Post_Order_Lk(tree->n_root,tree->n_root->v[2],tree);
+
+                      Update_Partial_Lk(tree,tree->n_root->b[1],tree->n_root);
+                      Update_Partial_Lk(tree,tree->n_root->b[2],tree->n_root);
+
+                      if(tree->both_sides == YES)
+                        {
+                          Pre_Order_Lk(tree->n_root,tree->n_root->v[2],tree);
+                          Pre_Order_Lk(tree->n_root,tree->n_root->v[1],tree);
+                        }
+                    }
+                  else
+                    {
+                      Post_Order_Lk(tree->e_root->rght,tree->e_root->left,tree);
+                      Post_Order_Lk(tree->e_root->left,tree->e_root->rght,tree);
+
+                      if(tree->both_sides == YES)
+                        {
+                          Pre_Order_Lk(tree->e_root->rght,tree->e_root->left,tree);
+                          Pre_Order_Lk(tree->e_root->left,tree->e_root->rght,tree);
+                        }
                     }
                 }
               else
                 {
-                  Post_Order_Lk(tree->e_root->rght,tree->e_root->left,tree);
-                  Post_Order_Lk(tree->e_root->left,tree->e_root->rght,tree);
-                  
+                  Post_Order_Lk(tree->a_nodes[tree->tip_root],tree->a_nodes[tree->tip_root]->v[0],tree);
                   if(tree->both_sides == YES)
-                    {
-                      Pre_Order_Lk(tree->e_root->rght,tree->e_root->left,tree);
-                      Pre_Order_Lk(tree->e_root->left,tree->e_root->rght,tree);
-                    }
+                    Pre_Order_Lk(tree->a_nodes[tree->tip_root],tree->a_nodes[tree->tip_root]->v[0],tree);
                 }
-            }
-          else
-            {
-              Post_Order_Lk(tree->a_nodes[tree->tip_root],tree->a_nodes[tree->tip_root]->v[0],tree);
-              if(tree->both_sides == YES)
-                Pre_Order_Lk(tree->a_nodes[tree->tip_root],tree->a_nodes[tree->tip_root]->v[0],tree);
             }
         }
     }
@@ -644,12 +1887,77 @@ phydbl Lk(t_edge *b, t_tree *tree)
   tree->c_lnL             = .0;
   tree->sum_min_sum_scale = .0;
 
+#if PHYML_MT_LK_RUNTIME
+  if(tree->lk_thread_ctx != NULL)
+    {
+      lk_mt_threads = PhyML_MT_Threads_Site_Lk((int)npatterns,(int)ncatg,(int)ns,tree);
+      if(tree->use_eigen_lr == YES)
+        eigen_mt_threads = PhyML_MT_Threads_Update_Eigen_Lr((int)npatterns,(int)ncatg,(int)ns,tree);
+    }
+#endif
+
 #ifdef BEAGLE
   calc_edgelks_beagle(b, tree);
 #else
 
+#if PHYML_MT_LK_RUNTIME
+  if(tree->lk_wavefront_valid == YES &&
+     tree->lk_wavefront_jobs != NULL &&
+     tree->lk_wavefront_level_offsets != NULL &&
+     partial_mt_threads > 1 &&
+     tree->lk_thread_ctx != NULL)
+    {
+      int pipeline_threads = partial_mt_threads;
+
+      if(eigen_mt_threads > pipeline_threads) pipeline_threads = eigen_mt_threads;
+      if(lk_mt_threads > pipeline_threads) pipeline_threads = lk_mt_threads;
+
+      if(pipeline_threads > 1)
+        {
+          #pragma omp parallel num_threads(pipeline_threads)
+            {
+              t_lk_thread_ctx *ctx = PhyML_MT_Get_Thread_Ctx(tree);
+
+              assert(ctx != NULL);
+              ctx->numerical_warning = NO;
+
+              PhyML_Update_All_Partial_Lk_Wavefront_Team(tree,
+                                                         tree->lk_wavefront_jobs,
+                                                         tree->lk_wavefront_level_offsets,
+                                                         tree->lk_wavefront_nlevels,
+                                                         ctx);
+
+              if(tree->use_eigen_lr == YES && tree->update_eigen_lr == YES)
+                {
+                  PhyML_Update_Eigen_And_Lk_Sites_Team(b,tree,expl,ctx);
+                }
+              else
+                {
+                  PhyML_Lk_Sites_Team(b,tree,expl,ctx);
+                }
+            }
+
+          tree->c_lnL = .0;
+          for(site=0;site<npatterns;++site)
+            {
+              if(tree->data->wght[site] > SMALL)
+                tree->c_lnL += tree->data->wght[site] * tree->c_lnL_sorted[site];
+            }
+
+          tree->numerical_warning = PhyML_MT_Collect_Warnings(tree,pipeline_threads);
+          return tree->c_lnL;
+        }
+    }
+#endif
+
   
-  if(tree->update_eigen_lr == YES) Update_Eigen_Lr(b,tree);
+  if(tree->update_eigen_lr == YES)
+    {
+#if PHYML_MT_LK_RUNTIME
+      if(!(lk_mt_threads > 1 && tree->use_eigen_lr == YES))
+#endif
+        Update_Eigen_Lr(b,tree);
+    }
   
   if(tree->use_eigen_lr == YES)
     {  
@@ -663,6 +1971,42 @@ phydbl Lk(t_edge *b, t_tree *tree)
           for(state=0;state<ns;++state) expl[catg*ns+state] = exp(tree->mod->eigen->e_val[state]*len);
         }
     }
+
+#if PHYML_MT_LK_RUNTIME
+  {
+    const int nthreads = lk_mt_threads;
+
+    if(nthreads > 1 && tree->lk_thread_ctx != NULL)
+      {
+        #pragma omp parallel num_threads(nthreads)
+          {
+            t_lk_thread_ctx *ctx = PhyML_MT_Get_Thread_Ctx(tree);
+
+            assert(ctx != NULL);
+            ctx->numerical_warning = NO;
+
+            if(tree->use_eigen_lr == YES && tree->update_eigen_lr == YES)
+              {
+                PhyML_Update_Eigen_And_Lk_Sites_Team(b,tree,expl,ctx);
+              }
+            else
+              {
+                PhyML_Lk_Sites_Team(b,tree,expl,ctx);
+              }
+          }
+
+        tree->c_lnL = .0;
+        for(site=0;site<npatterns;++site)
+          {
+            if(tree->data->wght[site] > SMALL)
+              tree->c_lnL += tree->data->wght[site] * tree->c_lnL_sorted[site];
+          }
+
+        tree->numerical_warning = PhyML_MT_Collect_Warnings(tree,nthreads);
+        return tree->c_lnL;
+      }
+  }
+#endif
 
   p_lk_left = b->p_lk_left;
   p_lk_rght = b->rght->tax ? b->p_lk_tip_r : b->p_lk_rght;
@@ -724,6 +2068,9 @@ phydbl dLk(phydbl *l, t_edge *b, t_tree *tree)
   const unsigned int ns = tree->mod->ns;
   const unsigned int ncatg = tree->mod->ras->n_catg;
   const unsigned int npattern = tree->n_pattern;
+#if PHYML_MT_LK_RUNTIME
+  int dlk_mt_threads = 1;
+#endif
 
   phydbl *dot_prod = tree->dot_prod;
   phydbl *expl = tree->expl;
@@ -744,8 +2091,21 @@ phydbl dLk(phydbl *l, t_edge *b, t_tree *tree)
 #endif
       return MIXT_dLk(l,b,tree);
     }
+
+#if PHYML_MT_LK_RUNTIME
+  if(tree->lk_thread_ctx != NULL)
+    {
+      dlk_mt_threads = PhyML_MT_Threads_dLk((int)npattern,(int)ncatg,(int)ns,tree);
+    }
+#endif
     
-  if(tree->update_eigen_lr == YES) Update_Eigen_Lr(b,tree);
+  if(tree->update_eigen_lr == YES)
+    {
+#if PHYML_MT_LK_RUNTIME
+      if(dlk_mt_threads <= 1)
+#endif
+        Update_Eigen_Lr(b,tree);
+    }
   
   for(catg=0;catg<ncatg;catg++)
     {
@@ -790,6 +2150,74 @@ phydbl dLk(phydbl *l, t_edge *b, t_tree *tree)
     
   dlnlk  = 0.0;
   lnlk   = 0.0;
+
+#if PHYML_MT_LK_RUNTIME
+  {
+    const int nthreads = dlk_mt_threads;
+
+    if(nthreads > 1 && tree->lk_thread_ctx != NULL)
+      {
+        #pragma omp parallel num_threads(nthreads)
+          {
+            unsigned int begin,end;
+            unsigned int local_site;
+            t_lk_thread_ctx *ctx = PhyML_MT_Get_Thread_Ctx(tree);
+
+            assert(ctx != NULL);
+            ctx->numerical_warning = NO;
+
+            if(tree->update_eigen_lr == YES) PhyML_Update_Eigen_Lr_Team(b,tree,ctx);
+            #pragma omp barrier
+
+            PhyML_MT_Get_Site_Range(npattern,&begin,&end);
+
+            for(local_site=begin;local_site<end;++local_site)
+              {
+                if(tree->data->wght[local_site] > SMALL)
+                  {
+                    phydbl lk_site,dlk_site,log_site_lk;
+                    int site_warning = NO;
+
+                    Lk_dLk_Site_Eigen_Local(local_site,
+                                            expl,
+                                            dot_prod + (size_t)local_site * ns * ncatg,
+                                            b,tree,
+                                            ctx->site_lk_cat,
+                                            &site_warning,
+                                            &lk_site,&dlk_site);
+
+                    dlk_site /= lk_site;
+                    log_site_lk = log(lk_site) - (phydbl)LOG2 * tree->fact_sum_scale[local_site];
+                    tree->site_dlnL[local_site] = tree->data->wght[local_site] * dlk_site;
+                    tree->c_lnL_sorted[local_site] = log_site_lk;
+                    tree->cur_site_lk[local_site] = exp(log_site_lk);
+                    if(site_warning == YES) ctx->numerical_warning = YES;
+                  }
+                else
+                  {
+                    tree->site_dlnL[local_site] = .0;
+                  }
+              }
+          }
+
+        dlnlk = .0;
+        lnlk  = .0;
+        for(site=0;site<npattern;++site)
+          {
+            if(tree->data->wght[site] > SMALL)
+              {
+                dlnlk += tree->site_dlnL[site];
+                lnlk += tree->data->wght[site] * tree->c_lnL_sorted[site];
+              }
+          }
+
+        tree->numerical_warning = PhyML_MT_Collect_Warnings(tree,nthreads);
+        tree->c_dlnL = dlnlk;
+        tree->c_lnL  = lnlk;
+        return tree->c_lnL;
+      }
+  }
+#endif
   
   for(site=0;site<npattern;++site)
     {
@@ -1096,6 +2524,235 @@ void Lk_dLk_Core_Eigen_Lr(phydbl *expl, phydbl *dot_prod, t_edge *b, phydbl *lk,
 //////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////
 
+#if PHYML_MT_LK_RUNTIME
+static void Default_Update_Eigen_Lr_Team(t_edge *b, t_tree *tree, t_lk_thread_ctx *ctx)
+{
+  unsigned int site,catg,i,j;
+  phydbl *r_e_vect,*l_e_vect,*pi;
+  const unsigned int npattern = tree->n_pattern;
+  const unsigned int ns = tree->mod->ns;
+  const unsigned int ncatg = tree->mod->ras->n_catg;
+  const unsigned int nsncatg = ns*ncatg;
+  phydbl *left_pi;
+
+  assert(ctx != NULL);
+  left_pi = ctx->p_lk_left_pi;
+
+  r_e_vect = tree->mod->eigen->r_e_vect;
+  l_e_vect = tree->mod->eigen->l_e_vect;
+  pi       = tree->mod->e_frq->pi->v;
+
+  #pragma omp for schedule(static)
+  for(site=0;site<npattern;++site)
+    {
+      phydbl *site_dot_prod = tree->dot_prod + (size_t)site * nsncatg;
+      const phydbl *site_p_lk_left = b->left->tax ?
+        (b->p_lk_tip_l + (size_t)site * ns) :
+        (b->p_lk_left + (size_t)site * nsncatg);
+      const phydbl *site_p_lk_rght = b->rght->tax ?
+        (b->p_lk_tip_r + (size_t)site * ns) :
+        (b->p_lk_rght + (size_t)site * nsncatg);
+
+      if(tree->data->wght[site] > SMALL)
+        {
+          for(catg=0;catg<ncatg;++catg)
+            {
+              for(j=0;j<ns;++j) left_pi[j] = site_p_lk_left[j] * pi[j];
+
+              for(i=0;i<ns;++i)
+                {
+                  phydbl left = .0;
+                  phydbl rght = .0;
+
+                  for(j=0;j<ns;++j)
+                    {
+                      left += r_e_vect[j*ns + i] * left_pi[j];
+                      rght += l_e_vect[i*ns + j] * site_p_lk_rght[j];
+                    }
+
+                  site_dot_prod[i] = left * rght;
+                }
+
+              site_dot_prod += ns;
+              if(b->left->tax == NO) site_p_lk_left += ns;
+              if(b->rght->tax == NO) site_p_lk_rght += ns;
+            }
+        }
+    }
+}
+
+static void Default_Update_Eigen_And_Lk_Sites_Team(t_edge *b, t_tree *tree, const phydbl *expl, t_lk_thread_ctx *ctx)
+{
+  unsigned int site,catg,i,j;
+  phydbl *r_e_vect,*l_e_vect,*pi;
+  const unsigned int npattern = tree->n_pattern;
+  const unsigned int ns = tree->mod->ns;
+  const unsigned int ncatg = tree->mod->ras->n_catg;
+  phydbl *left_pi;
+  phydbl *site_dot_prod;
+
+  assert(ctx != NULL);
+  left_pi = ctx->p_lk_left_pi;
+  site_dot_prod = ctx->site_dot_prod;
+
+  r_e_vect = tree->mod->eigen->r_e_vect;
+  l_e_vect = tree->mod->eigen->l_e_vect;
+  pi       = tree->mod->e_frq->pi->v;
+
+  #pragma omp for schedule(static)
+  for(site=0;site<npattern;++site)
+    {
+      const phydbl *site_p_lk_left = b->left->tax ?
+        (b->p_lk_tip_l + (size_t)site * ns) :
+        (b->p_lk_left + (size_t)site * ns * ncatg);
+      const phydbl *site_p_lk_rght = b->rght->tax ?
+        (b->p_lk_tip_r + (size_t)site * ns) :
+        (b->p_lk_rght + (size_t)site * ns * ncatg);
+
+      if(tree->data->wght[site] > SMALL)
+        {
+          int site_warning = NO;
+          phydbl *catg_dot_prod = site_dot_prod;
+          phydbl *global_dot_prod = tree->dot_prod + (size_t)site * ns * ncatg;
+
+          for(catg=0;catg<ncatg;++catg)
+            {
+              for(j=0;j<ns;++j) left_pi[j] = site_p_lk_left[j] * pi[j];
+
+              for(i=0;i<ns;++i)
+                {
+                  phydbl left = .0;
+                  phydbl rght = .0;
+
+                  for(j=0;j<ns;++j)
+                    {
+                      left += r_e_vect[j*ns + i] * left_pi[j];
+                      rght += l_e_vect[i*ns + j] * site_p_lk_rght[j];
+                    }
+
+                  catg_dot_prod[i] = left * rght;
+                  global_dot_prod[catg*ns + i] = catg_dot_prod[i];
+                }
+
+              catg_dot_prod += ns;
+              if(b->left->tax == NO) site_p_lk_left += ns;
+              if(b->rght->tax == NO) site_p_lk_rght += ns;
+            }
+
+          Lk_Site_Eigen_Local(site,expl,site_dot_prod,b,tree,ctx->site_lk_cat,&site_warning);
+          if(site_warning == YES) ctx->numerical_warning = YES;
+        }
+    }
+}
+
+static int PhyML_MT_Collect_Warnings(t_tree *tree, int nthreads)
+{
+  int thread_id;
+  int warning = NO;
+
+  for(thread_id=0;thread_id<nthreads && thread_id<tree->lk_mt_max_threads;++thread_id)
+    {
+      if(tree->lk_thread_ctx[thread_id].numerical_warning == YES)
+        {
+          warning = YES;
+          break;
+        }
+    }
+
+  return warning;
+}
+
+static void PhyML_Lk_Sites_Team(t_edge *b, t_tree *tree, const phydbl *expl, t_lk_thread_ctx *ctx)
+{
+  const unsigned int ns = tree->mod->ns;
+  const unsigned int ncatg = tree->mod->ras->n_catg;
+  const unsigned int nsncatg = ns * ncatg;
+  unsigned int site;
+
+  assert(ctx != NULL);
+
+  #pragma omp for schedule(static)
+  for(site=0;site<tree->n_pattern;++site)
+    {
+      if(tree->data->wght[site] > SMALL)
+        {
+          int site_warning = NO;
+
+          if(tree->use_eigen_lr == YES)
+            {
+              Lk_Site_Eigen_Local(site,
+                                  expl,
+                                  tree->dot_prod + (size_t)site * nsncatg,
+                                  b,tree,
+                                  ctx->site_lk_cat,
+                                  &site_warning);
+            }
+          else
+            {
+              const phydbl *site_p_lk_left = (b->left->tax == YES)?
+                (b->p_lk_tip_l + (size_t)site * ns):
+                (b->p_lk_left + (size_t)site * nsncatg);
+              const phydbl *site_p_lk_rght = (b->rght->tax == YES)?
+                (b->p_lk_tip_r + (size_t)site * ns):
+                (b->p_lk_rght + (size_t)site * nsncatg);
+              int site_ambiguity_check = -1;
+              int site_state = -1;
+
+              if((b->rght->tax) && (tree->mod->s_opt->greedy == NO))
+                {
+                  site_ambiguity_check = b->rght->c_seq->is_ambigu[site];
+                  if(site_ambiguity_check == NO) site_state = b->rght->c_seq->d_state[site];
+                }
+
+              if(tree->mod->use_m4mod) site_ambiguity_check = YES;
+
+              Lk_Site_No_Eigen_Local(site,
+                                     site_state,site_ambiguity_check,
+                                     site_p_lk_left,site_p_lk_rght,
+                                     b->Pij_rr,b->tPij_rr,
+                                     b,tree,
+                                     ctx->site_lk_cat,
+                                     &site_warning);
+            }
+
+          if(site_warning == YES) ctx->numerical_warning = YES;
+        }
+    }
+}
+
+static void PhyML_Update_Eigen_Lr_Team(t_edge *b, t_tree *tree, t_lk_thread_ctx *ctx)
+{
+  if(tree->mod->ns == 4 || tree->mod->ns == 20)
+    {
+#if ((defined(__AVX__) || defined(__AVX2__)) && !defined(DISABLE_NATIVE))
+      AVX_Update_Eigen_Lr_Team(b,tree,ctx);
+      return;
+#elif ((defined(__SSE__) || defined(__SSE2__) || defined(__SSE3__)) && !defined(DISABLE_NATIVE))
+      SSE_Update_Eigen_Lr_Team(b,tree,ctx);
+      return;
+#endif
+    }
+
+  Default_Update_Eigen_Lr_Team(b,tree,ctx);
+}
+
+static void PhyML_Update_Eigen_And_Lk_Sites_Team(t_edge *b, t_tree *tree, const phydbl *expl, t_lk_thread_ctx *ctx)
+{
+  if(tree->mod->ns == 4 || tree->mod->ns == 20)
+    {
+#if ((defined(__AVX__) || defined(__AVX2__)) && !defined(DISABLE_NATIVE))
+      AVX_Update_Eigen_And_Lk_Sites_Team(b,tree,expl,ctx);
+      return;
+#elif ((defined(__SSE__) || defined(__SSE2__) || defined(__SSE3__)) && !defined(DISABLE_NATIVE))
+      SSE_Update_Eigen_And_Lk_Sites_Team(b,tree,expl,ctx);
+      return;
+#endif
+    }
+
+  Default_Update_Eigen_And_Lk_Sites_Team(b,tree,expl,ctx);
+}
+#endif
+
 void Update_Eigen_Lr(t_edge *b, t_tree *tree)
 {
   unsigned int site,catg,i,j;
@@ -1137,6 +2794,22 @@ void Update_Eigen_Lr(t_edge *b, t_tree *tree)
 
   if(b->rght->tax == YES) p_lk_rght = b->p_lk_tip_r;
   else                    p_lk_rght = b->p_lk_rght;
+
+#if PHYML_MT_LK_RUNTIME
+  {
+    const int nthreads = PhyML_MT_Threads_Update_Eigen_Lr((int)npattern,(int)ncatg,(int)ns,tree);
+
+    if(nthreads > 1 && tree->lk_thread_ctx != NULL)
+      {
+        #pragma omp parallel num_threads(nthreads)
+        {
+          t_lk_thread_ctx *ctx = PhyML_MT_Get_Thread_Ctx(tree);
+          PhyML_Update_Eigen_Lr_Team(b,tree,ctx);
+        }
+        return;
+      }
+  }
+#endif
 
   for(site=0;site<npattern;++site)
     {
@@ -1712,17 +3385,57 @@ void Default_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
                                  tree->data->wght);
 }
 
+#if PHYML_MT_LK_RUNTIME && PHYML_OPT_PARTIAL_LK
+static void Default_Update_Partial_Lk_Team(t_tree *tree, t_edge *b, t_node *d, t_lk_thread_ctx *ctx)
+{
+  t_node *n_v1, *n_v2;
+  phydbl *p_lk;
+  phydbl *p_lk_v1,*p_lk_v2;
+  phydbl *Pij1,*Pij2;
+  phydbl *tPij1,*tPij2;
+  int *sum_scale, *sum_scale_v1, *sum_scale_v2;
+  int *p_lk_loc;
+  const unsigned int ncatg = tree->mod->ras->n_catg;
+  const unsigned int ns = tree->mod->ns;
+  const unsigned int n_patterns = tree->n_pattern;
+
+  (void)ctx;
+
+  n_v1 = n_v2                 = NULL;
+  p_lk = p_lk_v1 = p_lk_v2    = NULL;
+  Pij1 = Pij2                 = NULL;
+  tPij1 = tPij2               = NULL;
+  p_lk_loc                    = NULL;
+  sum_scale_v1                = NULL;
+  sum_scale_v2                = NULL;
+
+  Set_All_Partial_Lk(&n_v1,&n_v2,
+                     &p_lk,&sum_scale,&p_lk_loc,
+                     &Pij1,&tPij1,&p_lk_v1,&sum_scale_v1,
+                     &Pij2,&tPij2,&p_lk_v2,&sum_scale_v2,
+                     d,b,tree);
+
+  Core_Default_Update_Partial_Lk_Team(n_v1,n_v2,
+                                      p_lk,p_lk_v1,p_lk_v2,
+                                      Pij1,Pij2,
+                                      sum_scale,sum_scale_v1,sum_scale_v2,
+                                      (int)ns,(int)ncatg,(int)n_patterns,
+                                      tree->apply_lk_scaling,
+                                      tree->data->wght);
+}
+#endif
+
 
 //////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////
 
 #if PHYML_MT_LK_RUNTIME && PHYML_OPT_PARTIAL_LK
-static void Core_Default_Update_Partial_Lk_MT(const t_node *n_v1, const t_node *n_v2,
-                                              phydbl *plk0, const phydbl *plk1, const phydbl *plk2,
-                                              const phydbl *Pij1, const phydbl *Pij2,
-                                              int *sum_scale0, const int *sum_scale1, const int *sum_scale2,
-                                              const int ns, const int ncatg, const int npatterns, const int apply_scaling,
-                                              const phydbl *wght)
+static void Core_Default_Update_Partial_Lk_Team(const t_node *n_v1, const t_node *n_v2,
+                                                phydbl *plk0, const phydbl *plk1, const phydbl *plk2,
+                                                const phydbl *Pij1, const phydbl *Pij2,
+                                                int *sum_scale0, const int *sum_scale1, const int *sum_scale2,
+                                                const int ns, const int ncatg, const int npatterns, const int apply_scaling,
+                                                const phydbl *wght)
 {
   const unsigned int ncatgns = (unsigned int)ncatg * (unsigned int)ns;
   const unsigned int nsns = (unsigned int)ns * (unsigned int)ns;
@@ -1743,7 +3456,7 @@ static void Core_Default_Update_Partial_Lk_MT(const t_node *n_v1, const t_node *
   const phydbl *init_Pij2 = Pij2;
   int site;
 
-  #pragma omp parallel for schedule(static)
+  #pragma omp for schedule(static)
   for(site=0;site<npatterns;++site)
     {
       unsigned int i,catg;
@@ -1952,6 +3665,24 @@ static void Core_Default_Update_Partial_Lk_MT(const t_node *n_v1, const t_node *
         }
     }
 }
+
+static void Core_Default_Update_Partial_Lk_MT(const t_node *n_v1, const t_node *n_v2,
+                                              phydbl *plk0, const phydbl *plk1, const phydbl *plk2,
+                                              const phydbl *Pij1, const phydbl *Pij2,
+                                              int *sum_scale0, const int *sum_scale1, const int *sum_scale2,
+                                              const int ns, const int ncatg, const int npatterns, const int apply_scaling,
+                                              const phydbl *wght, const int nthreads)
+{
+  #pragma omp parallel num_threads(nthreads)
+    {
+      Core_Default_Update_Partial_Lk_Team(n_v1,n_v2,
+                                          plk0,plk1,plk2,
+                                          Pij1,Pij2,
+                                          sum_scale0,sum_scale1,sum_scale2,
+                                          ns,ncatg,npatterns,apply_scaling,
+                                          wght);
+    }
+}
 #endif
 
 //////////////////////////////////////////////////////////////
@@ -1966,16 +3697,20 @@ void Core_Default_Update_Partial_Lk(const t_node *n_v1, const t_node *n_v2,
 {
 #if PHYML_OPT_PARTIAL_LK
 #if PHYML_MT_LK_RUNTIME
-  if(PhyML_Should_MT_Update_Partial_Lk(npatterns,ncatg,ns))
+  {
+    const int nthreads = PhyML_MT_Threads_Update_Partial_Lk(npatterns,ncatg,ns);
+
+    if(nthreads > 1)
     {
       Core_Default_Update_Partial_Lk_MT(n_v1,n_v2,
                                         plk0,plk1,plk2,
                                         Pij1,Pij2,
                                         sum_scale0,sum_scale1,sum_scale2,
                                         ns,ncatg,npatterns,apply_scaling,
-                                        wght);
+                                        wght,nthreads);
       return;
     }
+  }
 #endif
   unsigned int i,site,ncatgns,catg,nsns;
   int state_v1,state_v2;
@@ -2874,6 +4609,15 @@ void Update_PMat_At_Given_Edge(t_edge *b_fcus, t_tree *tree)
         }
   }
 #endif
+    if(b_fcus->packed_tPij_rr != NULL)
+      {
+        memcpy(b_fcus->packed_tPij_rr,
+               b_fcus->tPij_rr,
+               (size_t)tree->mod->ras->n_catg *
+               (size_t)tree->mod->ns *
+               (size_t)tree->mod->ns *
+               sizeof(phydbl));
+      }
     if(tree->mod->log_l == YES) b_fcus->l->v = log(b_fcus->l->v);
 
 //      Print_Model(tree->mod);

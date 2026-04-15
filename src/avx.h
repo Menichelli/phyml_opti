@@ -27,6 +27,12 @@ the GNU public licence.  See http://www.opensource.org for details.
 
 void AVX_Update_Partial_Lk(t_tree *tree,t_edge *b_fcus,t_node *n);
 void AVX_Update_Eigen_Lr(t_edge *b, t_tree *tree);
+#if PHYML_OPT_PARTIAL_LK
+void AVX_Update_Partial_Lk_Team(t_tree *tree, t_edge *b_fcus, t_node *n, t_lk_thread_ctx *ctx);
+void AVX_Update_Partial_Lk_Wavefront_Job(t_tree *tree, t_edge *b_fcus, t_node *n, t_lk_thread_ctx *ctx);
+#endif
+void AVX_Update_Eigen_Lr_Team(t_edge *b, t_tree *tree, t_lk_thread_ctx *ctx);
+void AVX_Update_Eigen_And_Lk_Sites_Team(t_edge *b, t_tree *tree, const phydbl *expl, t_lk_thread_ctx *ctx);
 phydbl AVX_Lk_Core_One_Class_Eigen_Lr(const phydbl *dot_prod, const phydbl *expl, const unsigned int ns);
 void AVX_Lk_dLk_Core_One_Class_Eigen_Lr(const phydbl *dot_prod, const phydbl *expl, const unsigned int ns, phydbl *lk, phydbl *dlk);
 phydbl AVX_Lk_Core_One_Class_No_Eigen_Lr(const phydbl *p_lk_left, const phydbl *p_lk_rght, const phydbl *Pij, const phydbl *tPij, const phydbl *pi, const int ns, const int ambiguity_check, const int observed_state);  

@@ -16,6 +16,11 @@ the GNU public licence. See http://www.opensource.org for details.
 #include "sse2neon.h"
 #endif
 
+phydbl Lk_Site_Eigen_Local(unsigned int site,
+                           const phydbl *expl, const phydbl *dot_prod,
+                           t_edge *b, t_tree *tree,
+                           phydbl *site_lk_cat_local, int *site_warning);
+
 //////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////
 
@@ -40,10 +45,120 @@ static inline phydbl SSE_Vect_Max(__m128d x);
 static inline phydbl SSE_Vects_Max(const __m128d *x, unsigned int nblocks);
 
 #if PHYML_MT_LK_RUNTIME
-static int PhyML_Should_MT_SSE_Update_Partial_Lk(int npatterns, int ncatg, int ns)
+static int PhyML_MT_Force_Max_Threads_SSE(void)
 {
-  const long long work = (long long)npatterns * (long long)ncatg * (long long)ns;
-  return (omp_get_max_threads() > 1 && work >= 4096LL);
+  static int init = 0;
+  static int force_max = 0;
+
+  if(init == 0)
+    {
+      const char *env = getenv("PHYML_MT_LK_THREAD_MODE");
+      if(env != NULL)
+        {
+          if(env[0] == 'm' || env[0] == 'M' || env[0] == '1')
+            force_max = 1;
+        }
+
+      env = getenv("PHYML_MT_LK_FORCE_MAX_THREADS");
+      if(env != NULL && env[0] != '\0' && env[0] != '0')
+        force_max = 1;
+
+      init = 1;
+    }
+
+  return force_max;
+}
+
+static int PhyML_MT_Recommended_SSE_Threads(long long work, long long min_work_per_thread)
+{
+  const int max_threads = omp_get_max_threads();
+  int threads;
+
+  if(max_threads <= 1) return 1;
+  if(PhyML_MT_Force_Max_Threads_SSE() == 1) return max_threads;
+  if(max_threads <= 1 || work < min_work_per_thread) return 1;
+
+  threads = (int)((work + min_work_per_thread - 1LL) / min_work_per_thread);
+  if(threads < 1) threads = 1;
+  if(threads > max_threads) threads = max_threads;
+  return threads;
+}
+
+static int PhyML_MT_Threads_SSE_Update_Partial_Lk(int npatterns, int ncatg, int ns)
+{
+  const long long work = (long long)npatterns * (long long)ncatg * (long long)ns * (long long)ns;
+  return PhyML_MT_Recommended_SSE_Threads(work,224000LL);
+}
+
+static int PhyML_MT_Threads_SSE_Update_Eigen_Lr(int npatterns, int ncatg, int ns)
+{
+  const long long work = (long long)npatterns * (long long)ncatg * (long long)ns * (long long)ns;
+  return PhyML_MT_Recommended_SSE_Threads(work,128000LL);
+}
+
+static void PhyML_MT_SSE_Get_Site_Range(unsigned int nsites, unsigned int *begin, unsigned int *end)
+{
+  const unsigned int tid = (unsigned int)omp_get_thread_num();
+  const unsigned int nth = (unsigned int)omp_get_num_threads();
+
+  *begin = (unsigned int)(((unsigned long long)nsites * tid) / nth);
+  *end   = (unsigned int)(((unsigned long long)nsites * (tid + 1U)) / nth);
+}
+
+static void SSE_Prepare_Eigen_Packs(t_tree *tree)
+{
+  unsigned int i,j;
+  const unsigned int ns = tree->mod->ns;
+  const unsigned int sz = (unsigned int)BYTE_ALIGN / 8U;
+  const unsigned int nblocks = ns / sz;
+  phydbl *l_ev,*r_ev;
+
+  if(tree->eigen_pack_valid == YES &&
+     tree->eigen_pack_epoch == tree->mod->eigen_epoch)
+    return;
+
+  l_ev = tree->l_ev;
+  r_ev = tree->mod->eigen->r_e_vect;
+
+  for(i=0;i<ns;++i)
+    for(j=0;j<ns;++j)
+      l_ev[i*ns+j] = tree->mod->eigen->l_e_vect[j*ns+i];
+
+  l_ev = tree->l_ev;
+  for(i=0;i<ns;++i)
+    {
+      for(j=0;j<nblocks;++j)
+        {
+          tree->_r_ev[i*nblocks+j] = _mm_load_pd(r_ev + j*sz);
+          tree->_l_ev[i*nblocks+j] = _mm_load_pd(l_ev + j*sz);
+        }
+      r_ev += ns;
+      l_ev += ns;
+    }
+
+  tree->eigen_pack_epoch = tree->mod->eigen_epoch;
+  tree->eigen_pack_valid = YES;
+}
+
+static const __m128d *SSE_Find_Packed_tPij(const t_tree *tree, const phydbl *raw_tPij)
+{
+  int i;
+
+  if(raw_tPij == NULL) return NULL;
+
+  for(i=0;i<2*tree->n_otu-1;++i)
+    {
+      const t_edge *edge = tree->a_edges[i];
+
+      if(edge != NULL && edge->tPij_rr == raw_tPij)
+        {
+          assert(edge->packed_tPij_rr != NULL);
+          return (const __m128d *)edge->packed_tPij_rr;
+        }
+    }
+
+  assert(FALSE);
+  return NULL;
 }
 #endif
 
@@ -331,12 +446,39 @@ static inline phydbl SSE_Partial_Lk_Inin_Max(const __m128d *_tPij1, const phydbl
 }
 
 #if PHYML_MT_LK_RUNTIME
-static void SSE_Update_Partial_Lk_MT(t_tree *tree,
-                                     const t_node *n_v1, const t_node *n_v2,
-                                     phydbl *plk0, const phydbl *plk1, const phydbl *plk2,
-                                     int *sum_scale, const int *sum_scale_v1, const int *sum_scale_v2,
-                                     const __m128d *init_tPij1, const __m128d *init_tPij2,
-                                     const unsigned int npattern, const unsigned int ns, const unsigned int ncatg)
+static void SSE_Copy_tPij_Local(const phydbl *src_tPij1, const phydbl *src_tPij2,
+                                __m128d *dst_tPij1, __m128d *dst_tPij2,
+                                const unsigned int ns, const unsigned int ncatg)
+{
+  const unsigned int sz = (unsigned int)BYTE_ALIGN / 8U;
+  const unsigned int nblocks = ns / sz;
+  unsigned int i,j,k;
+
+  for(i=0;i<ncatg;++i)
+    {
+      for(j=0;j<ns;++j)
+        {
+          for(k=0;k<nblocks;++k)
+            {
+              dst_tPij1[k] = _mm_load_pd(src_tPij1);
+              dst_tPij2[k] = _mm_load_pd(src_tPij2);
+              src_tPij1 += sz;
+              src_tPij2 += sz;
+            }
+          dst_tPij1 += nblocks;
+          dst_tPij2 += nblocks;
+        }
+    }
+}
+
+static void SSE_Update_Partial_Lk_Prepared_Range(t_tree *tree,
+                                                 const t_node *n_v1, const t_node *n_v2,
+                                                 phydbl *plk0, const phydbl *plk1, const phydbl *plk2,
+                                                 int *sum_scale, const int *sum_scale_v1, const int *sum_scale_v2,
+                                                 const __m128d *init_tPij1, const __m128d *init_tPij2,
+                                                 const unsigned int site_begin, const unsigned int site_end,
+                                                 const unsigned int ns, const unsigned int ncatg,
+                                                 t_lk_thread_ctx *ctx)
 {
   const unsigned int ncatgns = ncatg * ns;
   const unsigned int nsns = ns * ns;
@@ -355,10 +497,18 @@ static void SSE_Update_Partial_Lk_MT(t_tree *tree,
   const short int *is_ambigu_v2 = (tax_v2) ? n_v2->c_seq->is_ambigu : NULL;
   const short int *d_state_v1 = (tax_v1) ? n_v1->c_seq->d_state : NULL;
   const short int *d_state_v2 = (tax_v2) ? n_v2->c_seq->d_state : NULL;
-  int site;
+  __m128d *pmat1plk1_local;
+  __m128d *pmat2plk2_local;
+  __m128d *plk0_local;
+  unsigned int site;
 
-  #pragma omp parallel for schedule(static)
-  for(site=0;site<(int)npattern;++site)
+  assert(ctx != NULL);
+
+  pmat1plk1_local = ctx->_pmat1plk1;
+  pmat2plk2_local = ctx->_pmat2plk2;
+  plk0_local      = ctx->_plk0;
+
+  for(site=site_begin;site<site_end;++site)
     {
       unsigned int catg,k;
       short int state_v1 = -1;
@@ -370,9 +520,6 @@ static void SSE_Update_Partial_Lk_MT(t_tree *tree,
       phydbl *site_plk0;
       const phydbl *site_plk1,*site_plk2;
       const __m128d *site_tPij1,*site_tPij2;
-      __m128d pmat1plk1_local[nblocks];
-      __m128d pmat2plk2_local[nblocks];
-      __m128d plk0_local[nblocks];
 
       if(tree->data->wght[site] <= SMALL) continue;
 
@@ -483,13 +630,239 @@ static void SSE_Update_Partial_Lk_MT(t_tree *tree,
         }
     }
 }
+
+static void SSE_Update_Partial_Lk_Prepared_Team(t_tree *tree,
+                                                const t_node *n_v1, const t_node *n_v2,
+                                                phydbl *plk0, const phydbl *plk1, const phydbl *plk2,
+                                                int *sum_scale, const int *sum_scale_v1, const int *sum_scale_v2,
+                                                const __m128d *init_tPij1, const __m128d *init_tPij2,
+                                                const unsigned int npattern, const unsigned int ns, const unsigned int ncatg,
+                                                t_lk_thread_ctx *ctx)
+{
+  unsigned int begin,end;
+
+  assert(ctx != NULL);
+
+  PhyML_MT_SSE_Get_Site_Range(npattern,&begin,&end);
+  SSE_Update_Partial_Lk_Prepared_Range(tree,
+                                       n_v1,n_v2,
+                                       plk0,plk1,plk2,
+                                       sum_scale,sum_scale_v1,sum_scale_v2,
+                                       init_tPij1,init_tPij2,
+                                       begin,end,ns,ncatg,ctx);
+}
+
+static void SSE_Update_Partial_Lk_MT(t_tree *tree,
+                                     const t_node *n_v1, const t_node *n_v2,
+                                     phydbl *plk0, const phydbl *plk1, const phydbl *plk2,
+                                     int *sum_scale, const int *sum_scale_v1, const int *sum_scale_v2,
+                                     const __m128d *init_tPij1, const __m128d *init_tPij2,
+                                     const unsigned int npattern, const unsigned int ns, const unsigned int ncatg,
+                                     const int nthreads)
+{
+  #pragma omp parallel num_threads(nthreads)
+    {
+      t_lk_thread_ctx *ctx = tree->lk_thread_ctx + omp_get_thread_num();
+      SSE_Update_Partial_Lk_Prepared_Team(tree,
+                                          n_v1,n_v2,
+                                          plk0,plk1,plk2,
+                                          sum_scale,sum_scale_v1,sum_scale_v2,
+                                          init_tPij1,init_tPij2,
+                                          npattern,ns,ncatg,ctx);
+    }
+}
 #endif
+#endif
+
+#if PHYML_MT_LK_RUNTIME
+#if PHYML_OPT_PARTIAL_LK
+void SSE_Update_Partial_Lk_Team(t_tree *tree, t_edge *b, t_node *d, t_lk_thread_ctx *ctx)
+{
+  t_node *n_v1, *n_v2;
+  phydbl *plk0,*plk1,*plk2;
+  phydbl *Pij1,*Pij2;
+  phydbl *tPij1,*tPij2;
+  int *sum_scale, *sum_scale_v1, *sum_scale_v2;
+  int *p_lk_loc;
+  const unsigned int npattern = tree->n_pattern;
+  const unsigned int ns = tree->mod->ns;
+  const unsigned int ncatg = tree->mod->ras->n_catg;
+  const __m128d *init_tPij1,*init_tPij2;
+
+  assert(ctx != NULL);
+
+  n_v1 = n_v2                 = NULL;
+  plk0 = plk1 = plk2          = NULL;
+  Pij1 = Pij2                 = NULL;
+  tPij1 = tPij2               = NULL;
+  sum_scale = sum_scale_v1 = sum_scale_v2 = NULL;
+  p_lk_loc                    = NULL;
+
+  Set_All_Partial_Lk(&n_v1,&n_v2,
+                     &plk0,&sum_scale,&p_lk_loc,
+                     &Pij1,&tPij1,&plk1,&sum_scale_v1,
+                     &Pij2,&tPij2,&plk2,&sum_scale_v2,
+                     d,b,tree);
+
+  if(tree->mod->augmented == YES)
+    {
+      #pragma omp single
+      {
+        PhyML_Printf("\n== SSE version of the Update_Partial_Lk function does not");
+        PhyML_Printf("\n== allow augmented data.");
+        assert(FALSE);
+      }
+      return;
+    }
+
+  init_tPij1 = SSE_Find_Packed_tPij(tree,tPij1);
+  init_tPij2 = SSE_Find_Packed_tPij(tree,tPij2);
+
+  SSE_Update_Partial_Lk_Prepared_Team(tree,
+                                      n_v1,n_v2,
+                                      plk0,plk1,plk2,
+                                      sum_scale,sum_scale_v1,sum_scale_v2,
+                                      init_tPij1,init_tPij2,
+                                      npattern,ns,ncatg,ctx);
+}
+
+void SSE_Update_Partial_Lk_Wavefront_Job(t_tree *tree, t_edge *b, t_node *d, t_lk_thread_ctx *ctx)
+{
+  t_node *n_v1, *n_v2;
+  phydbl *plk0,*plk1,*plk2;
+  phydbl *Pij1,*Pij2;
+  phydbl *tPij1,*tPij2;
+  int *sum_scale, *sum_scale_v1, *sum_scale_v2;
+  int *p_lk_loc;
+  const unsigned int npattern = tree->n_pattern;
+  const unsigned int ns = tree->mod->ns;
+  const unsigned int ncatg = tree->mod->ras->n_catg;
+
+  assert(ctx != NULL);
+
+  n_v1 = n_v2                 = NULL;
+  plk0 = plk1 = plk2          = NULL;
+  Pij1 = Pij2                 = NULL;
+  tPij1 = tPij2               = NULL;
+  sum_scale = sum_scale_v1 = sum_scale_v2 = NULL;
+  p_lk_loc                    = NULL;
+
+  Set_All_Partial_Lk(&n_v1,&n_v2,
+                     &plk0,&sum_scale,&p_lk_loc,
+                     &Pij1,&tPij1,&plk1,&sum_scale_v1,
+                     &Pij2,&tPij2,&plk2,&sum_scale_v2,
+                     d,b,tree);
+
+  if(tree->mod->augmented == YES)
+    {
+      PhyML_Printf("\n== SSE version of the Update_Partial_Lk function does not");
+      PhyML_Printf("\n== allow augmented data.");
+      assert(FALSE);
+    }
+
+  SSE_Update_Partial_Lk_Prepared_Range(tree,
+                                       n_v1,n_v2,
+                                       plk0,plk1,plk2,
+                                       sum_scale,sum_scale_v1,sum_scale_v2,
+                                       SSE_Find_Packed_tPij(tree,tPij1),
+                                       SSE_Find_Packed_tPij(tree,tPij2),
+                                       0U,npattern,ns,ncatg,ctx);
+}
+#endif
+
+static void SSE_Update_Eigen_Sites_Team(t_edge *b, t_tree *tree, const phydbl *expl, t_lk_thread_ctx *ctx, int fused_site_lk)
+{
+  unsigned int site,catg;
+  unsigned int i;
+
+  const unsigned int npattern = tree->n_pattern;
+  const unsigned int ncatg = tree->mod->ras->n_catg;
+  const unsigned int ns = tree->mod->ns;
+  const unsigned int sz = (int)BYTE_ALIGN / 8;
+  const unsigned int nblocks = ns / sz;
+  const unsigned int ncatgns = ncatg*ns;
+
+  const phydbl *pi;
+  __m128d *_l_ev,*_r_ev;
+  phydbl *p_lk_left_pi;
+  __m128d *prod_left,*prod_rght;
+
+  assert(ctx != NULL);
+  assert(sz == 2);
+  assert(tree->update_eigen_lr == YES);
+
+  p_lk_left_pi = ctx->p_lk_left_pi;
+  prod_left    = ctx->_prod_left;
+  prod_rght    = ctx->_prod_rght;
+  _l_ev        = tree->_l_ev;
+  _r_ev        = tree->_r_ev;
+  pi           = tree->mod->e_frq->pi->v;
+
+  #pragma omp single
+  SSE_Prepare_Eigen_Packs(tree);
+
+  #pragma omp for schedule(static)
+  for(site=0;site<npattern;++site)
+    {
+      phydbl *site_dot_prod = fused_site_lk ? ctx->site_dot_prod : (tree->dot_prod + (size_t)site * ncatgns);
+      const phydbl *site_p_lk_left = b->left->tax ?
+        (b->p_lk_tip_l + (size_t)site * ns) :
+        (b->p_lk_left + (size_t)site * ncatgns);
+      const phydbl *site_p_lk_rght = b->rght->tax ?
+        (b->p_lk_tip_r + (size_t)site * ns) :
+        (b->p_lk_rght + (size_t)site * ncatgns);
+
+      if(tree->data->wght[site] > SMALL)
+        {
+          int site_warning = NO;
+
+          for(catg=0;catg<ncatg;++catg)
+            {
+              for(i=0;i<ns;++i) p_lk_left_pi[i] = site_p_lk_left[i] * pi[i];
+
+              SSE_Matrix_Vect_Prod(_r_ev,p_lk_left_pi,ns,prod_left);
+              SSE_Matrix_Vect_Prod(_l_ev,site_p_lk_rght,ns,prod_rght);
+
+              for(i=0;i<nblocks;++i)
+                _mm_store_pd(site_dot_prod + i*sz,_mm_mul_pd(prod_left[i],prod_rght[i]));
+
+              site_dot_prod += ns;
+              if(b->left->tax == NO) site_p_lk_left += ns;
+              if(b->rght->tax == NO) site_p_lk_rght += ns;
+            }
+
+          if(fused_site_lk)
+            {
+              memcpy(tree->dot_prod + (size_t)site * ncatgns,
+                     ctx->site_dot_prod,
+                     (size_t)ncatgns * sizeof(phydbl));
+              Lk_Site_Eigen_Local(site,
+                                  expl,
+                                  ctx->site_dot_prod,
+                                  b,tree,
+                                  ctx->site_lk_cat,
+                                  &site_warning);
+              if(site_warning == YES) ctx->numerical_warning = YES;
+            }
+        }
+    }
+}
+
+void SSE_Update_Eigen_Lr_Team(t_edge *b, t_tree *tree, t_lk_thread_ctx *ctx)
+{
+  SSE_Update_Eigen_Sites_Team(b,tree,NULL,ctx,NO);
+}
+
+void SSE_Update_Eigen_And_Lk_Sites_Team(t_edge *b, t_tree *tree, const phydbl *expl, t_lk_thread_ctx *ctx)
+{
+  SSE_Update_Eigen_Sites_Team(b,tree,expl,ctx,YES);
+}
 #endif
 
 void SSE_Update_Eigen_Lr(t_edge *b, t_tree *tree)
 {
   unsigned int site,catg;
-  unsigned int i,j;
+  unsigned int i;
   
   unsigned const int npattern = tree->n_pattern;
   unsigned const int ncatg = tree->mod->ras->n_catg;
@@ -500,12 +873,10 @@ void SSE_Update_Eigen_Lr(t_edge *b, t_tree *tree)
 
   const phydbl *p_lk_left,*p_lk_rght,*pi;
   phydbl *dot_prod,*p_lk_left_pi;
-  phydbl *l_ev,*r_ev;
 
   __m128d *_l_ev,*_r_ev,*_prod_left,*_prod_rght;
   
   p_lk_left_pi = tree->p_lk_left_pi;
-  l_ev         = tree->l_ev;
   _l_ev        = tree->_l_ev;
   _r_ev        = tree->_r_ev;
   _prod_left   = tree->_prod_left;
@@ -513,30 +884,29 @@ void SSE_Update_Eigen_Lr(t_edge *b, t_tree *tree)
   
   assert(sz == 2);
   assert(tree->update_eigen_lr == YES);
-  
-  r_ev = tree->mod->eigen->r_e_vect;
-  
-  /* Copy transpose of matrix of left eigen vectors */
-  for(i=0;i<ns;++i)
-    for(j=0;j<ns;++j)
-      l_ev[i*ns+j] = tree->mod->eigen->l_e_vect[j*ns+i];
-  
-  /* Load into AVX registers */
-  for(i=0;i<ns;++i)
-    {
-      for(j=0;j<nblocks;++j)
-        {
-          _r_ev[i*nblocks+j] = _mm_load_pd(r_ev + j*sz);
-          _l_ev[i*nblocks+j] = _mm_load_pd(l_ev + j*sz);
-        }
-      r_ev += ns;
-      l_ev += ns;
-    }
+
+  SSE_Prepare_Eigen_Packs(tree);
 
   p_lk_left = b->left->tax ? b->p_lk_tip_l : b->p_lk_left;
   p_lk_rght = b->rght->tax ? b->p_lk_tip_r : b->p_lk_rght;
   pi = tree->mod->e_frq->pi->v;
   dot_prod = tree->dot_prod;
+
+#if PHYML_MT_LK_RUNTIME
+  {
+    const int nthreads = PhyML_MT_Threads_SSE_Update_Eigen_Lr((int)npattern,(int)ncatg,(int)ns);
+
+    if(nthreads > 1 && tree->lk_thread_ctx != NULL)
+      {
+        #pragma omp parallel num_threads(nthreads)
+        {
+          t_lk_thread_ctx *ctx = tree->lk_thread_ctx + omp_get_thread_num();
+          SSE_Update_Eigen_Lr_Team(b,tree,ctx);
+        }
+        return;
+      }
+  }
+#endif
   
   for(site=0;site<npattern;++site)
     {
@@ -734,7 +1104,7 @@ void SSE_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
   phydbl *tPij1,*tPij2;
   int *sum_scale, *sum_scale_v1, *sum_scale_v2;
   int sum_scale_v1_val, sum_scale_v2_val;
-  unsigned int i,j,k;
+  unsigned int i,k;
   unsigned int catg,site;
   short int state_v1,state_v2;
   short int ambiguity_check_v1,ambiguity_check_v2;
@@ -801,27 +1171,9 @@ void SSE_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
   is_ambigu_v2 = (tax_v2) ? n_v2->c_seq->is_ambigu : NULL;
   d_state_v1   = (tax_v1) ? n_v1->c_seq->d_state : NULL;
   d_state_v2   = (tax_v2) ? n_v2->c_seq->d_state : NULL;
- 
-  // Copy transpose of transition matrices into AVX registers
-  for(i=0;i<ncatg;++i)
-    {
-      for(j=0;j<ns;++j)
-        {
-          for(k=0;k<nblocks;++k)
-            {
-              _tPij1[k] = _mm_load_pd(tPij1);
-              _tPij2[k] = _mm_load_pd(tPij2);
-              tPij1 += sz;
-              tPij2 += sz;
-            }
-          _tPij1 += nblocks;
-          _tPij2 += nblocks;
-        }
-    }
-  _tPij1 -= ncatg*ns*nblocks;
-  _tPij2 -= ncatg*ns*nblocks;
-  init_tPij1 = _tPij1;
-  init_tPij2 = _tPij2;
+
+  init_tPij1 = SSE_Find_Packed_tPij(tree,tPij1);
+  init_tPij2 = SSE_Find_Packed_tPij(tree,tPij2);
 
   if(tree->mod->augmented == YES)
     {
@@ -831,16 +1183,20 @@ void SSE_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
     }
 
 #if PHYML_MT_LK_RUNTIME && PHYML_OPT_PARTIAL_LK
-  if(PhyML_Should_MT_SSE_Update_Partial_Lk(npattern,ncatg,ns))
+  {
+    const int nthreads = PhyML_MT_Threads_SSE_Update_Partial_Lk((int)npattern,(int)ncatg,(int)ns);
+
+    if(nthreads > 1)
     {
       SSE_Update_Partial_Lk_MT(tree,
                                n_v1,n_v2,
                                plk0,plk1,plk2,
                                sum_scale,sum_scale_v1,sum_scale_v2,
                                init_tPij1,init_tPij2,
-                               npattern,ns,ncatg);
+                               npattern,ns,ncatg,nthreads);
       return;
     }
+  }
 #endif
     
   /* For every site in the alignment */

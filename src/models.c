@@ -250,14 +250,12 @@ void PMat_Empirical(phydbl l, const t_mod *mod, const int pos, phydbl *Pij, phyd
   const unsigned int ns = mod->ns;
   unsigned int i, j, k;
   const phydbl *U,*V,*R;
-  phydbl *expt;
-  phydbl *uexpt;
+  phydbl expt[ns];
+  phydbl uexpt[ns * ns];
   phydbl sum;
   
   assert(Pij);
   
-  expt  = mod->eigen->e_val_im;
-  uexpt = mod->eigen->r_e_vect_im;
   U     = mod->eigen->r_e_vect;
   V     = mod->eigen->l_e_vect;
   R     = mod->eigen->e_val;
@@ -944,6 +942,8 @@ int Update_Eigen(t_mod *mod)
         {
           PhyML_Fprintf(stderr,"\n. WARNING: imaginary eigenvectors not null.");
         }
+
+      ++mod->eigen_epoch;
     }
   return 1;
 }
@@ -969,13 +969,11 @@ void PMat_MGF_Gamma(phydbl mu, phydbl sigsq, const t_mod *mod, const int pos, ph
 {
   const unsigned int ns = mod->ns;
   unsigned int i,j,k;
-  phydbl *uexpt,*imbd;
+  phydbl uexpt[ns * ns];
+  phydbl imbd[ns];
   
   Pij = Pij + pos;
   if(tPij != NULL) tPij = tPij + pos;
-
-  uexpt = mod->eigen->r_e_vect_im;
-  imbd  = mod->eigen->e_val_im;
 
   for(i=0;i<ns;i++) imbd[i]  = POW(1. - mod->eigen->e_val[i] * sigsq / mu, -mu*mu / sigsq);
   for(i=0;i<ns;i++) for(k=0;k<ns;k++) uexpt[i*ns+k] = mod->eigen->r_e_vect[i*ns+k] * imbd[k];
@@ -1206,5 +1204,3 @@ phydbl GTR_Dist(phydbl *F, phydbl alpha, eigen *eigen_struct)
   if(isnan(dist)) return -1.;
   return dist;
 }
-
-
