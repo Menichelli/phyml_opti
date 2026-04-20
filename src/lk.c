@@ -51,6 +51,12 @@ typedef enum
   PHYML_MT_PHASE_COUNT = 6
 } t_phyml_mt_phase;
 
+typedef enum
+{
+  PHYML_MT_UPDATE_ALL_PARTIAL_MODE_LEGACY = 0,
+  PHYML_MT_UPDATE_ALL_PARTIAL_MODE_WAVEFRONT = 1
+} t_phyml_mt_update_all_partial_mode;
+
 static const char *PhyML_MT_Backend_Name(t_phyml_mt_backend backend)
 {
   switch(backend)
@@ -233,6 +239,24 @@ static int PhyML_MT_Threads_Update_Partial_Lk(int npatterns, int ncatg, int ns)
   return PhyML_MT_Recommended_Threads(work,npatterns,PHYML_MT_BACKEND_SCALAR,PHYML_MT_PHASE_PARTIAL_LK);
 }
 
+static t_phyml_mt_update_all_partial_mode PhyML_MT_Select_Update_All_Partial_Lk_Mode(const t_tree *tree)
+{
+  const t_phyml_mt_backend backend = PhyML_MT_Detect_Backend(tree);
+
+  if(tree == NULL || tree->mod == NULL || tree->mod->s_opt == NULL)
+    return PHYML_MT_UPDATE_ALL_PARTIAL_MODE_WAVEFRONT;
+
+  /* Fixed-tree likelihoods benefit from the wavefront cache. The MT8/MT12
+     regression shows up during topology search on AVX, where the old
+     job-by-job traversal remains better below 16 requested threads. */
+  if(tree->mod->s_opt->opt_topo == YES &&
+     backend == PHYML_MT_BACKEND_AVX &&
+     omp_get_max_threads() < 16)
+    return PHYML_MT_UPDATE_ALL_PARTIAL_MODE_LEGACY;
+
+  return PHYML_MT_UPDATE_ALL_PARTIAL_MODE_WAVEFRONT;
+}
+
 static int PhyML_MT_Threads_Update_All_Partial_Lk(int njobs, int nlevels, int max_width,
                                                   int npatterns, int ncatg, int ns,
                                                   const t_tree *tree)
@@ -370,6 +394,8 @@ static int PhyML_Can_Use_Update_Partial_Lk_Wavefront(const t_tree *tree);
 static void PhyML_Fill_Update_Partial_Lk_Job_Metadata(t_tree *tree, t_lk_update_job *job);
 static int PhyML_Build_Update_All_Partial_Lk_Wavefront(t_tree *tree, t_lk_update_job *jobs, int njobs, int *level_offsets);
 static void PhyML_Execute_Update_Partial_Lk_Job(t_tree *tree, t_edge *b, t_node *d, t_lk_thread_ctx *ctx);
+static void PhyML_Update_All_Partial_Lk_Legacy_Team(t_tree *tree, const t_lk_update_job *jobs, int njobs, t_lk_thread_ctx *ctx);
+static void PhyML_Update_All_Partial_Lk_Legacy_MT(t_tree *tree, const t_lk_update_job *jobs, int njobs, int nthreads);
 static void PhyML_Update_All_Partial_Lk_Wavefront_Team(t_tree *tree, const t_lk_update_job *jobs, const int *level_offsets, int nlevels, t_lk_thread_ctx *ctx);
 static void PhyML_Update_All_Partial_Lk_Wavefront_MT(t_tree *tree, const t_lk_update_job *jobs, const int *level_offsets, int nlevels, int nthreads);
 static unsigned long long PhyML_Update_All_Partial_Lk_Wavefront_Signature(const t_tree *tree);
@@ -796,6 +822,29 @@ static void PhyML_Execute_Update_Partial_Lk_Job(t_tree *tree, t_edge *b, t_node 
 #else
   Default_Update_Partial_Lk(tree,b,d);
 #endif
+}
+
+static void PhyML_Update_All_Partial_Lk_Legacy_Team(t_tree *tree, const t_lk_update_job *jobs, int njobs, t_lk_thread_ctx *ctx)
+{
+  int job;
+
+  assert(ctx != NULL);
+
+  for(job=0;job<njobs;++job)
+    {
+      PhyML_Update_Partial_Lk_Team(tree,jobs[job].b,jobs[job].d,ctx);
+    }
+}
+
+static void PhyML_Update_All_Partial_Lk_Legacy_MT(t_tree *tree, const t_lk_update_job *jobs, int njobs, int nthreads)
+{
+  #pragma omp parallel num_threads(nthreads)
+    {
+      t_lk_thread_ctx *ctx = PhyML_MT_Get_Thread_Ctx(tree);
+
+      assert(ctx != NULL);
+      PhyML_Update_All_Partial_Lk_Legacy_Team(tree,jobs,njobs,ctx);
+    }
 }
 
 static void PhyML_Update_All_Partial_Lk_Wavefront_Team(t_tree *tree, const t_lk_update_job *jobs, const int *level_offsets, int nlevels, t_lk_thread_ctx *ctx)
@@ -1262,6 +1311,7 @@ void Update_All_Partial_Lk(t_tree *tree)
       const int npatterns = (int)tree->n_pattern;
       const int ncatg = (int)tree->mod->ras->n_catg;
       const int ns = (int)tree->mod->ns;
+      t_phyml_mt_update_all_partial_mode update_mode = PHYML_MT_UPDATE_ALL_PARTIAL_MODE_WAVEFRONT;
       int nthreads;
 
       if(PhyML_Ensure_Update_All_Partial_Lk_Wavefront_Cache(tree) == YES)
@@ -1273,11 +1323,23 @@ void Update_All_Partial_Lk(t_tree *tree)
 
           if(nthreads > 1)
             {
-              PhyML_Update_All_Partial_Lk_Wavefront_MT(tree,
-                                                       tree->lk_wavefront_jobs,
-                                                       tree->lk_wavefront_level_offsets,
-                                                       tree->lk_wavefront_nlevels,
-                                                       nthreads);
+              update_mode = PhyML_MT_Select_Update_All_Partial_Lk_Mode(tree);
+
+              if(update_mode == PHYML_MT_UPDATE_ALL_PARTIAL_MODE_LEGACY)
+                {
+                  PhyML_Update_All_Partial_Lk_Legacy_MT(tree,
+                                                        tree->lk_wavefront_jobs,
+                                                        tree->lk_wavefront_njobs,
+                                                        nthreads);
+                }
+              else
+                {
+                  PhyML_Update_All_Partial_Lk_Wavefront_MT(tree,
+                                                           tree->lk_wavefront_jobs,
+                                                           tree->lk_wavefront_level_offsets,
+                                                           tree->lk_wavefront_nlevels,
+                                                           nthreads);
+                }
               return;
             }
         }
@@ -1710,8 +1772,9 @@ phydbl Lk(t_edge *b, t_tree *tree)
   const unsigned int npatterns = tree->n_pattern;
   const unsigned int nsncatg = ns * ncatg;
   int partial_mt_threads = 1;
-#if PHYML_MT_LK_RUNTIME
   int pmat_mt_threads = 1;
+#if PHYML_MT_LK_RUNTIME
+  t_phyml_mt_update_all_partial_mode partial_mt_mode = PHYML_MT_UPDATE_ALL_PARTIAL_MODE_WAVEFRONT;
   int lk_mt_threads = 1;
   int eigen_mt_threads = 1;
 #endif
@@ -1828,6 +1891,7 @@ phydbl Lk(t_edge *b, t_tree *tree)
                                                                               (int)ncatg,
                                                                               (int)ns,
                                                                               tree);
+                  partial_mt_mode = PhyML_MT_Select_Update_All_Partial_Lk_Mode(tree);
                 }
             }
 #endif
@@ -1921,11 +1985,21 @@ phydbl Lk(t_edge *b, t_tree *tree)
               assert(ctx != NULL);
               ctx->numerical_warning = NO;
 
-              PhyML_Update_All_Partial_Lk_Wavefront_Team(tree,
-                                                         tree->lk_wavefront_jobs,
-                                                         tree->lk_wavefront_level_offsets,
-                                                         tree->lk_wavefront_nlevels,
-                                                         ctx);
+              if(partial_mt_mode == PHYML_MT_UPDATE_ALL_PARTIAL_MODE_LEGACY)
+                {
+                  PhyML_Update_All_Partial_Lk_Legacy_Team(tree,
+                                                          tree->lk_wavefront_jobs,
+                                                          tree->lk_wavefront_njobs,
+                                                          ctx);
+                }
+              else
+                {
+                  PhyML_Update_All_Partial_Lk_Wavefront_Team(tree,
+                                                             tree->lk_wavefront_jobs,
+                                                             tree->lk_wavefront_level_offsets,
+                                                             tree->lk_wavefront_nlevels,
+                                                             ctx);
+                }
 
               if(tree->use_eigen_lr == YES && tree->update_eigen_lr == YES)
                 {
