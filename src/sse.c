@@ -1349,6 +1349,9 @@ void SSE_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
                   }
               }
           #else
+            _tPij1 = (__m128d *)init_tPij1;
+            _tPij2 = (__m128d *)init_tPij2;
+
             for(catg=0;catg<ncatg;++catg)
               {
                 if(ambiguity_check_v1 == NO && ambiguity_check_v2 == NO)

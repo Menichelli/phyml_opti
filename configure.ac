@@ -6,6 +6,9 @@ AM_INIT_AUTOMAKE([foreign])
 AC_CONFIG_SRCDIR([src/main.c],[doc/phyml-manual.tex])
 AC_CONFIG_HEADERS([config.h])
 
+AC_DEFINE_UNQUOTED([VERSION], ["$PACKAGE_VERSION"], [Package version string.])
+AC_DEFINE_UNQUOTED([PACKAGE_VERSION], ["$PACKAGE_VERSION"], [Package version string.])
+
 AC_DEFINE([UNIX],[1],[Unix tag on])
 AC_DEFINE([DEBUG],[1],[Debug tag on])
 

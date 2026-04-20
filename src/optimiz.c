@@ -2271,12 +2271,18 @@ static phydbl Br_Len_Spline(phydbl *l, t_edge *b, int n_iter_max, phydbl tol, t_
   phydbl fu, fv;
   phydbl dfu, dfv;
   phydbl mult;
-  phydbl a_,b_,A_,B_,C_,D_,root1,root2;
+  phydbl a_,b_,A_,B_,C_,D_,root1,root2,disc_;
   short int ok1, ok2;
+  const phydbl deriv_tol = 1.E-12;
   // Warning: make sure eigen_lr vectors are already up-to-date 
 
   Set_Use_Eigen_Lr(YES,tree);
-  
+
+  if(*l > tree->mod->l_max) *l = 0.5;
+  if(*l < tree->mod->l_min) *l = 0.001;
+
+  dLk(l,b,tree);
+
   best_l = init_l = *l;
   best_lnL = old_lnL = init_lnL = tree->c_lnL;  
   mult = 1.2;
@@ -2284,12 +2290,13 @@ static phydbl Br_Len_Spline(phydbl *l, t_edge *b, int n_iter_max, phydbl tol, t_
   a_ = b_ = A_ = B_ = D_ = root1 = root2 = -1.;
   u = v = fu = fv = dfu = dfv = -1.;
   new_l = -1.;
-  
-  dLk(l,b,tree);
+
   init_dl = tree->c_dlnL;
-  
-  if(*l > tree->mod->l_max) *l = 0.5;
-  if(*l < tree->mod->l_min) *l = 0.001;
+
+  if(isnan(init_dl) || isinf(init_dl) || fabs(init_dl) <= deriv_tol)
+    {
+      return best_lnL;
+    }
   
   // Find value of l where first derivative is < 0;
   tree->c_dlnL = init_dl;
@@ -2367,33 +2374,36 @@ static phydbl Br_Len_Spline(phydbl *l, t_edge *b, int n_iter_max, phydbl tol, t_
       A_ = 3.*a_ - 3.*b_;
       B_ = -4.*a_ + 2.*b_;
       C_ = fv-fu+a_;
-      D_ = sqrt(B_*B_-4.*A_*C_);
+      disc_ = B_*B_-4.*A_*C_;
 
-      root1 = (-B_-D_)/(2.*A_);
-      root2 = (-B_+D_)/(2.*A_);
-
-      root1 = root1*(v-u) + u;
-      root2 = root2*(v-u) + u;
-      
       ok1 = NO;
       ok2 = NO;
-      if(root1 > u && root1 < v) ok1 = YES;
-      if(root2 > u && root2 < v) ok2 = YES;
+      if(fabs(A_) > SMALL_DBL &&
+         !isnan(disc_) &&
+         !isinf(disc_) &&
+         disc_ >= 0.0)
+        {
+          D_ = sqrt(disc_);
 
-      if(Are_Equal(root1,u,1.E-5) == YES) ok1 = YES;
-      if(Are_Equal(root2,u,1.E-5) == YES) ok2 = YES;
-      if(Are_Equal(root1,v,1.E-5) == YES) ok1 = YES;
-      if(Are_Equal(root2,v,1.E-5) == YES) ok2 = YES;
-      
+          root1 = (-B_-D_)/(2.*A_);
+          root2 = (-B_+D_)/(2.*A_);
+
+          root1 = root1*(v-u) + u;
+          root2 = root2*(v-u) + u;
+
+          if(root1 > u && root1 < v) ok1 = YES;
+          if(root2 > u && root2 < v) ok2 = YES;
+
+          if(Are_Equal(root1,u,1.E-5) == YES) ok1 = YES;
+          if(Are_Equal(root2,u,1.E-5) == YES) ok2 = YES;
+          if(Are_Equal(root1,v,1.E-5) == YES) ok1 = YES;
+          if(Are_Equal(root2,v,1.E-5) == YES) ok2 = YES;
+        }
 
       if(ok1 == YES && ok2 == YES) new_l = root1 < root2 ? root1 : root2;
       else if(ok1 == YES) new_l = root1;
       else if(ok2 == YES) new_l = root2;
-      else if(u/v > 1.1 || u/v < 0.9)
-        {
-          PhyML_Printf("\n. iter=%4d u=%12G fu=%12G dfu=%12G v=%12G fv=%12G dfv=%12G root1=%12G root2=%12G\n",iter,u,fu,dfu,v,fv,dfv,root1,root2);
-          assert(FALSE);
-        }
+      else new_l = (u+v) * 0.5;
       
 
       *l = new_l;
@@ -2405,6 +2415,11 @@ static phydbl Br_Len_Spline(phydbl *l, t_edge *b, int n_iter_max, phydbl tol, t_
         {
           best_lnL = tree->c_lnL;
           best_l   = *l;
+        }
+
+      if(isnan(tree->c_dlnL) || isinf(tree->c_dlnL) || fabs(tree->c_dlnL) <= deriv_tol)
+        {
+          converged = YES;
         }
             
       if(tree->c_dlnL > 0.0)

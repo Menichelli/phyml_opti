@@ -98,6 +98,7 @@ static void PhyML_MT_AVX_Get_Site_Range(unsigned int nsites, unsigned int *begin
   *begin = (unsigned int)(((unsigned long long)nsites * tid) / nth);
   *end   = (unsigned int)(((unsigned long long)nsites * (tid + 1U)) / nth);
 }
+#endif
 
 static void AVX_Prepare_Eigen_Packs(t_tree *tree)
 {
@@ -154,7 +155,6 @@ static const __m256d *AVX_Find_Packed_tPij(const t_tree *tree, const phydbl *raw
   assert(FALSE);
   return NULL;
 }
-#endif
 
 #if PHYML_OPT_PARTIAL_LK
 static inline int AVX_All_One(const phydbl *plk, unsigned int ns)
@@ -1469,6 +1469,9 @@ void AVX_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
                   }
               }
           #else
+            _tPij1 = (__m256d *)init_tPij1;
+            _tPij2 = (__m256d *)init_tPij2;
+
             for(catg=0;catg<ncatg;++catg)
               {                                                          
                 if(ambiguity_check_v1 == NO && ambiguity_check_v2 == NO)
