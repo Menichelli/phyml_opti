@@ -367,6 +367,7 @@ void Free_Tree_Lk(t_tree *tree)
   Free(tree->alias_subpatt_wght);
   Free(tree->alias_subpatt_hash_key);
   Free(tree->alias_subpatt_hash_rep);
+  Free(tree->alias_subpatt_active_sites);
   Free(tree->unscaled_site_lk_cat);
   Free(tree->expl);
   Free(tree->lk_wavefront_level_offsets);

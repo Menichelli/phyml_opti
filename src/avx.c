@@ -489,6 +489,7 @@ static void AVX_Copy_tPij_Local(const phydbl *src_tPij1, const phydbl *src_tPij2
         }
     }
 }
+#endif
 
 static void AVX_Update_Partial_Lk_Prepared_Range(t_tree *tree,
                                                  const t_node *n_v1, const t_node *n_v2,
@@ -498,6 +499,7 @@ static void AVX_Update_Partial_Lk_Prepared_Range(t_tree *tree,
                                                  const unsigned int site_begin, const unsigned int site_end,
                                                  const unsigned int ns, const unsigned int ncatg,
                                                  const phydbl *wght,
+                                                 const unsigned int *active_sites,
                                                  t_lk_thread_ctx *ctx)
 {
   const unsigned int ncatgns = ncatg * ns;
@@ -530,6 +532,7 @@ static void AVX_Update_Partial_Lk_Prepared_Range(t_tree *tree,
 
   for(site=site_begin;site<site_end;++site)
     {
+      const unsigned int aln_site = (active_sites != NULL)?(active_sites[site]):(site);
       unsigned int catg,k;
       short int state_v1 = -1;
       short int state_v2 = -1;
@@ -541,24 +544,24 @@ static void AVX_Update_Partial_Lk_Prepared_Range(t_tree *tree,
       const phydbl *site_plk1,*site_plk2;
       const __m256d *site_tPij1,*site_tPij2;
 
-      if(wght[site] <= SMALL) continue;
+      if(wght[aln_site] <= SMALL) continue;
 
-      site_plk0 = plk0 + (size_t)site * ncatgns;
-      site_plk1 = plk1 + (size_t)site * plk1_site_stride;
-      site_plk2 = plk2 + (size_t)site * plk2_site_stride;
+      site_plk0 = plk0 + (size_t)aln_site * ncatgns;
+      site_plk1 = plk1 + (size_t)aln_site * plk1_site_stride;
+      site_plk2 = plk2 + (size_t)aln_site * plk2_site_stride;
       site_tPij1 = init_tPij1;
       site_tPij2 = init_tPij2;
 
       if(tax_v1)
         {
-          ambiguity_check_v1 = is_ambigu_v1[site];
-          if(ambiguity_check_v1 == NO) state_v1 = d_state_v1[site];
+          ambiguity_check_v1 = is_ambigu_v1[aln_site];
+          if(ambiguity_check_v1 == NO) state_v1 = d_state_v1[aln_site];
         }
 
       if(tax_v2)
         {
-          ambiguity_check_v2 = is_ambigu_v2[site];
-          if(ambiguity_check_v2 == NO) state_v2 = d_state_v2[site];
+          ambiguity_check_v2 = is_ambigu_v2[aln_site];
+          if(ambiguity_check_v2 == NO) state_v2 = d_state_v2[aln_site];
         }
 
       for(catg=0;catg<ncatg;++catg)
@@ -637,20 +640,21 @@ static void AVX_Update_Partial_Lk_Prepared_Range(t_tree *tree,
 
       if(scale_fast)
         {
-          sum_scale[site] = (sum_scale_v1 ? sum_scale_v1[site] : 0) +
-                            (sum_scale_v2 ? sum_scale_v2[site] : 0);
+          sum_scale[aln_site] = (sum_scale_v1 ? sum_scale_v1[aln_site] : 0) +
+                                (sum_scale_v2 ? sum_scale_v2[aln_site] : 0);
 
           if(do_scaling && largest_p_lk < INV_TWO_TO_THE_LARGE &&
              tree->mod->augmented == NO &&
              tree->apply_lk_scaling == YES)
             {
               for(k=0;k<ncatgns;++k) site_plk0[k] *= TWO_TO_THE_LARGE;
-              sum_scale[site] += LARGE;
+              sum_scale[aln_site] += LARGE;
             }
         }
     }
 }
 
+#if PHYML_MT_LK_RUNTIME
 static void AVX_Update_Partial_Lk_Prepared_Team(t_tree *tree,
                                                 const t_node *n_v1, const t_node *n_v2,
                                                 phydbl *plk0, const phydbl *plk1, const phydbl *plk2,
@@ -658,19 +662,21 @@ static void AVX_Update_Partial_Lk_Prepared_Team(t_tree *tree,
                                                 const __m256d *init_tPij1, const __m256d *init_tPij2,
                                                 const unsigned int npattern, const unsigned int ns, const unsigned int ncatg,
                                                 const phydbl *wght,
+                                                const unsigned int *active_sites,
+                                                const unsigned int active_nsites,
                                                 t_lk_thread_ctx *ctx)
 {
   unsigned int begin,end;
 
   assert(ctx != NULL);
 
-  PhyML_MT_AVX_Get_Site_Range(npattern,&begin,&end);
+  PhyML_MT_AVX_Get_Site_Range((active_sites != NULL)?(active_nsites):(npattern),&begin,&end);
   AVX_Update_Partial_Lk_Prepared_Range(tree,
                                        n_v1,n_v2,
                                        plk0,plk1,plk2,
                                        sum_scale,sum_scale_v1,sum_scale_v2,
                                        init_tPij1,init_tPij2,
-                                       begin,end,ns,ncatg,wght,ctx);
+                                       begin,end,ns,ncatg,wght,active_sites,ctx);
 }
 
 static void AVX_Update_Partial_Lk_MT(t_tree *tree,
@@ -680,6 +686,8 @@ static void AVX_Update_Partial_Lk_MT(t_tree *tree,
                                      const __m256d *init_tPij1, const __m256d *init_tPij2,
                                      const unsigned int npattern, const unsigned int ns, const unsigned int ncatg,
                                      const phydbl *wght,
+                                     const unsigned int *active_sites,
+                                     const unsigned int active_nsites,
                                      const int nthreads)
 {
   #pragma omp parallel num_threads(nthreads)
@@ -690,7 +698,7 @@ static void AVX_Update_Partial_Lk_MT(t_tree *tree,
                                           plk0,plk1,plk2,
                                           sum_scale,sum_scale_v1,sum_scale_v2,
                                           init_tPij1,init_tPij2,
-                                          npattern,ns,ncatg,wght,ctx);
+                                          npattern,ns,ncatg,wght,active_sites,active_nsites,ctx);
     }
 }
 #endif
@@ -711,6 +719,8 @@ void AVX_Update_Partial_Lk_Team(t_tree *tree, t_edge *b, t_node *d, t_lk_thread_
   int *p_lk_loc;
   const phydbl *wght;
   int use_alias;
+  const unsigned int *active_sites;
+  unsigned int active_nsites;
   const unsigned int npattern = tree->n_pattern;
   const unsigned int ns = tree->mod->ns;
   const unsigned int ncatg = tree->mod->ras->n_catg;
@@ -747,6 +757,8 @@ void AVX_Update_Partial_Lk_Team(t_tree *tree, t_edge *b, t_node *d, t_lk_thread_
   init_tPij2 = AVX_Find_Packed_tPij(tree,tPij2);
   wght = tree->data->wght;
   use_alias = PhyML_Use_Subpatt_Aliasing(tree,p_lk_loc);
+  active_sites = NULL;
+  active_nsites = npattern;
 
   if(use_alias == YES)
     {
@@ -756,6 +768,8 @@ void AVX_Update_Partial_Lk_Team(t_tree *tree, t_edge *b, t_node *d, t_lk_thread_
       }
       #pragma omp barrier
       wght = tree->alias_subpatt_wght;
+      active_sites = tree->alias_subpatt_active_sites;
+      active_nsites = tree->alias_subpatt_nactive_sites;
     }
 
   AVX_Update_Partial_Lk_Prepared_Team(tree,
@@ -763,7 +777,7 @@ void AVX_Update_Partial_Lk_Team(t_tree *tree, t_edge *b, t_node *d, t_lk_thread_
                                       plk0,plk1,plk2,
                                       sum_scale,sum_scale_v1,sum_scale_v2,
                                       init_tPij1,init_tPij2,
-                                      npattern,ns,ncatg,wght,ctx);
+                                      npattern,ns,ncatg,wght,active_sites,active_nsites,ctx);
 
   if(use_alias == YES)
     {
@@ -817,7 +831,7 @@ void AVX_Update_Partial_Lk_Wavefront_Job(t_tree *tree, t_edge *b, t_node *d, t_l
                                        sum_scale,sum_scale_v1,sum_scale_v2,
                                        AVX_Find_Packed_tPij(tree,tPij1),
                                        AVX_Find_Packed_tPij(tree,tPij2),
-                                       0U,npattern,ns,ncatg,wght,ctx);
+                                       0U,npattern,ns,ncatg,wght,NULL,ctx);
 
   if(wght != tree->data->wght)
     PhyML_Copy_Subpatt_Partials(tree,plk0,sum_scale,p_lk_loc,ncatg,ns);
@@ -1244,6 +1258,7 @@ void AVX_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
   const short int *is_ambigu_v2;
   const short int *d_state_v1;
   const short int *d_state_v2;
+  t_lk_thread_ctx local_ctx;
 
   _tPij1     = tree->_tPij1;
   _tPij2     = tree->_tPij2;
@@ -1302,6 +1317,46 @@ void AVX_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
       assert(FALSE);
     }
 
+  if(wght != tree->data->wght)
+    {
+      memset(&local_ctx,0,sizeof(local_ctx));
+      local_ctx._pmat1plk1 = tree->_pmat1plk1;
+      local_ctx._pmat2plk2 = tree->_pmat2plk2;
+      local_ctx._plk0      = tree->_plk0;
+
+#if PHYML_MT_LK_RUNTIME && PHYML_OPT_PARTIAL_LK
+      {
+        const int nthreads = PhyML_MT_Threads_AVX_Update_Partial_Lk((int)npattern,(int)ncatg,(int)ns);
+
+        if(nthreads > 1)
+          {
+            AVX_Update_Partial_Lk_MT(tree,
+                                     n_v1,n_v2,
+                                     plk0,plk1,plk2,
+                                     sum_scale,sum_scale_v1,sum_scale_v2,
+                                     init_tPij1,init_tPij2,
+                                     npattern,ns,ncatg,wght,
+                                     tree->alias_subpatt_active_sites,
+                                     tree->alias_subpatt_nactive_sites,
+                                     nthreads);
+            PhyML_Copy_Subpatt_Partials(tree,plk0_base,sum_scale,p_lk_loc,ncatg,ns);
+            return;
+          }
+      }
+#endif
+
+      AVX_Update_Partial_Lk_Prepared_Range(tree,
+                                           n_v1,n_v2,
+                                           plk0,plk1,plk2,
+                                           sum_scale,sum_scale_v1,sum_scale_v2,
+                                           init_tPij1,init_tPij2,
+                                           0U,tree->alias_subpatt_nactive_sites,
+                                           ns,ncatg,wght,
+                                           tree->alias_subpatt_active_sites,
+                                           &local_ctx);
+      PhyML_Copy_Subpatt_Partials(tree,plk0_base,sum_scale,p_lk_loc,ncatg,ns);
+      return;
+    }
 #if PHYML_MT_LK_RUNTIME && PHYML_OPT_PARTIAL_LK
   {
     const int nthreads = PhyML_MT_Threads_AVX_Update_Partial_Lk((int)npattern,(int)ncatg,(int)ns);
@@ -1313,9 +1368,7 @@ void AVX_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
                                plk0,plk1,plk2,
                                sum_scale,sum_scale_v1,sum_scale_v2,
                                init_tPij1,init_tPij2,
-                               npattern,ns,ncatg,wght,nthreads);
-      if(wght != tree->data->wght)
-        PhyML_Copy_Subpatt_Partials(tree,plk0,sum_scale,p_lk_loc,ncatg,ns);
+                               npattern,ns,ncatg,wght,NULL,npattern,nthreads);
       return;
     }
   }

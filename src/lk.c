@@ -3407,13 +3407,21 @@ int PhyML_Use_Subpatt_Aliasing(const t_tree *tree, const int *p_lk_loc)
 const phydbl *PhyML_Prepare_Subpatt_Weight_Mask(t_tree *tree, const int *p_lk_loc)
 {
   phydbl *alias_wght;
+  unsigned int *active_sites;
   unsigned int site;
 
-  if(PhyML_Use_Subpatt_Aliasing(tree,p_lk_loc) == NO) return tree->data->wght;
+  if(PhyML_Use_Subpatt_Aliasing(tree,p_lk_loc) == NO)
+    {
+      tree->alias_subpatt_nactive_sites = 0U;
+      return tree->data->wght;
+    }
 
   assert(tree->alias_subpatt_wght != NULL);
+  assert(tree->alias_subpatt_active_sites != NULL);
 
   alias_wght = tree->alias_subpatt_wght;
+  active_sites = tree->alias_subpatt_active_sites;
+  tree->alias_subpatt_nactive_sites = 0U;
   for(site=0;site<tree->n_pattern;++site) alias_wght[site] = 0.0;
 
   for(site=0;site<tree->n_pattern;++site)
@@ -3423,6 +3431,11 @@ const phydbl *PhyML_Prepare_Subpatt_Weight_Mask(t_tree *tree, const int *p_lk_lo
           const int rep = p_lk_loc[site];
           assert(rep >= 0);
           assert((unsigned int)rep < tree->n_pattern);
+          if(alias_wght[rep] <= SMALL)
+            {
+              active_sites[tree->alias_subpatt_nactive_sites] = (unsigned int)rep;
+              tree->alias_subpatt_nactive_sites++;
+            }
           alias_wght[rep] = 1.0;
         }
     }

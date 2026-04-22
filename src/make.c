@@ -145,6 +145,7 @@ void Make_Tree_For_Lk(t_tree *tree)
   tree->unscaled_site_lk_cat = (phydbl *)mCalloc(MAX(tree->mod->ras->n_catg,tree->mod->n_mixt_classes)*tree->n_pattern,sizeof(phydbl));
   tree->fact_sum_scale       = (int *)mCalloc(tree->n_pattern,sizeof(int));
   tree->alias_subpatt_wght   = (phydbl *)mCalloc(tree->n_pattern,sizeof(phydbl));
+  tree->alias_subpatt_active_sites = (unsigned int *)mCalloc(tree->n_pattern,sizeof(unsigned int));
   alias_hash_size            = 1U;
   while(alias_hash_size < 4U * (unsigned int)MAX(tree->n_pattern,1)) alias_hash_size <<= 1U;
   tree->alias_subpatt_hash_size = alias_hash_size;

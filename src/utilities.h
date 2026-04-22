@@ -940,6 +940,8 @@ typedef struct __Tree{
   unsigned long long     *alias_subpatt_hash_key;
   int                    *alias_subpatt_hash_rep;
   unsigned int            alias_subpatt_hash_size;
+  unsigned int           *alias_subpatt_active_sites;
+  unsigned int            alias_subpatt_nactive_sites;
 
   phydbl                           geo_mig_sd; /*! standard deviation of the migration step random variable */
   phydbl                              geo_lnL; /*! log likelihood of the phylo-geography model */
