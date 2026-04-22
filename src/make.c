@@ -102,6 +102,7 @@ void Make_Tree_For_Lk(t_tree *tree)
 {
   int i;
   calign *cdata;
+  unsigned int alias_hash_size;
 
 
   if(tree->is_mixt_tree == YES)
@@ -144,6 +145,11 @@ void Make_Tree_For_Lk(t_tree *tree)
   tree->unscaled_site_lk_cat = (phydbl *)mCalloc(MAX(tree->mod->ras->n_catg,tree->mod->n_mixt_classes)*tree->n_pattern,sizeof(phydbl));
   tree->fact_sum_scale       = (int *)mCalloc(tree->n_pattern,sizeof(int));
   tree->alias_subpatt_wght   = (phydbl *)mCalloc(tree->n_pattern,sizeof(phydbl));
+  alias_hash_size            = 1U;
+  while(alias_hash_size < 4U * (unsigned int)MAX(tree->n_pattern,1)) alias_hash_size <<= 1U;
+  tree->alias_subpatt_hash_size = alias_hash_size;
+  tree->alias_subpatt_hash_key  = (unsigned long long *)mCalloc(alias_hash_size,sizeof(unsigned long long));
+  tree->alias_subpatt_hash_rep  = (int *)mCalloc(alias_hash_size,sizeof(int));
   
 #if (defined(__AVX__) || defined(__AVX2__))
 #ifndef WIN32

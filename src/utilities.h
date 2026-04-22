@@ -937,6 +937,9 @@ typedef struct __Tree{
   int                         write_tax_names;
   int                    update_alias_subpatt;
   phydbl                 *alias_subpatt_wght;
+  unsigned long long     *alias_subpatt_hash_key;
+  int                    *alias_subpatt_hash_rep;
+  unsigned int            alias_subpatt_hash_size;
 
   phydbl                           geo_mig_sd; /*! standard deviation of the migration step random variable */
   phydbl                              geo_lnL; /*! log likelihood of the phylo-geography model */

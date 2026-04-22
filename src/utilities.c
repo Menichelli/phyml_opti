@@ -12260,18 +12260,47 @@ void Alias_Subpatt(t_tree *tree)
 //////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////
 
+static unsigned long long Alias_Subpatt_Hash_Key(int key1, int key2)
+{
+  return (((unsigned long long)(unsigned int)key1) << 32) ^
+         (unsigned long long)(unsigned int)key2;
+}
+
+static unsigned int Alias_Subpatt_Hash_Slot(unsigned long long key, unsigned int mask)
+{
+  key ^= key >> 33;
+  key *= 0xff51afd7ed558ccdULL;
+  key ^= key >> 33;
+  key *= 0xc4ceb9fe1a85ec53ULL;
+  key ^= key >> 33;
+  return (unsigned int)key & mask;
+}
+
+//////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////
+
 void Alias_One_Subpatt(t_node *a, t_node *d, t_tree *tree)
 {
-  int i,j;
+  int i;
   int *patt_id_v1, *patt_id_v2, *patt_id_d;
-  int *p_lk_loc_d, *p_lk_loc_v1, *p_lk_loc_v2;
+  int *p_lk_loc_d;
   t_node *v1, *v2;
   t_edge *b0, *b1, *b2;
-  int curr_patt_id_v1, curr_patt_id_v2;
-  int curr_p_lk_loc_v1, curr_p_lk_loc_v2;
   int num_subpatt;
+  unsigned long long *hash_key;
+  int *hash_rep;
+  unsigned int hash_mask;
 
   b0 = b1 = b2 = NULL;
+  hash_key = tree->alias_subpatt_hash_key;
+  hash_rep = tree->alias_subpatt_hash_rep;
+  hash_mask = tree->alias_subpatt_hash_size - 1U;
+
+  assert(hash_key != NULL);
+  assert(hash_rep != NULL);
+  assert(tree->alias_subpatt_hash_size > 0U);
+
+  memset(hash_rep,0xFF,tree->alias_subpatt_hash_size * sizeof(int));
 
   if(d->tax)
     {
@@ -12279,21 +12308,23 @@ void Alias_One_Subpatt(t_node *a, t_node *d, t_tree *tree)
       p_lk_loc_d = (d == d->b[0]->left)?(d->b[0]->p_lk_loc_left):(d->b[0]->p_lk_loc_rght);
 
       for(i=0;i<tree->n_pattern;i++)
-    {
-      for(j=0;j<tree->n_pattern;j++)
         {
-          if(patt_id_d[i] == patt_id_d[j])
-        {
-          p_lk_loc_d[i] = j;
-          break;
+          const unsigned long long key = Alias_Subpatt_Hash_Key(patt_id_d[i],0);
+          unsigned int slot = Alias_Subpatt_Hash_Slot(key,hash_mask);
+
+          while(hash_rep[slot] != -1 && hash_key[slot] != key) slot = (slot + 1U) & hash_mask;
+
+          if(hash_rep[slot] == -1)
+            {
+              hash_key[slot] = key;
+              hash_rep[slot] = i;
+              p_lk_loc_d[i] = i;
+            }
+          else
+            {
+              p_lk_loc_d[i] = hash_rep[slot];
+            }
         }
-          if(j > i)
-        {
-          PhyML_Fprintf(stderr,"\n. Err in file %s at line %d\n\n",__FILE__,__LINE__);
-          Warn_And_Exit("");
-        }
-        }
-    }
       return;
     }
   else
@@ -12317,56 +12348,30 @@ void Alias_One_Subpatt(t_node *a, t_node *d, t_tree *tree)
       patt_id_v2  = (v2 == b2->left)?(b2->patt_id_left):(b2->patt_id_rght);
       patt_id_d   = (d  == b0->left)?(b0->patt_id_left):(b0->patt_id_rght);
       p_lk_loc_d  = (d  == b0->left)?(b0->p_lk_loc_left):(b0->p_lk_loc_rght);
-      p_lk_loc_v1 = (v1 == b1->left)?(b1->p_lk_loc_left):(b1->p_lk_loc_rght);
-      p_lk_loc_v2 = (v2 == b2->left)?(b2->p_lk_loc_left):(b2->p_lk_loc_rght);
 
       num_subpatt = 0;
       for(i=0;i<tree->n_pattern;i++)
-    {
-      curr_patt_id_v1  = patt_id_v1[i];
-      curr_patt_id_v2  = patt_id_v2[i];
-      curr_p_lk_loc_v1 = p_lk_loc_v1[i];
-      curr_p_lk_loc_v2 = p_lk_loc_v2[i];
-
-      p_lk_loc_d[i] = i;
-
-      if((curr_p_lk_loc_v1 == i) || (curr_p_lk_loc_v2 == i))
         {
-          p_lk_loc_d[i] = i;
-          patt_id_d[i] = num_subpatt;
-          num_subpatt++;
-        }
-      else
-        if(curr_p_lk_loc_v1 == curr_p_lk_loc_v2)
-          {
-        p_lk_loc_d[i] = curr_p_lk_loc_v1;
-        patt_id_d[i] = patt_id_d[curr_p_lk_loc_v1];
-          }
-        else
-          {
-        for(j=MAX(curr_p_lk_loc_v1,curr_p_lk_loc_v2);j<tree->n_pattern;j++)
-          {
-            if((patt_id_v1[j] == curr_patt_id_v1) &&
-               (patt_id_v2[j] == curr_patt_id_v2))
-              {
-            p_lk_loc_d[i] = j;
+          const unsigned long long key = Alias_Subpatt_Hash_Key(patt_id_v1[i],patt_id_v2[i]);
+          unsigned int slot = Alias_Subpatt_Hash_Slot(key,hash_mask);
+          int rep;
 
-            if(j == i)
-              {
-                patt_id_d[i] = num_subpatt;
-                num_subpatt++;
-              }
-            else patt_id_d[i] = patt_id_d[j];
-            break;
-              }
-            if(j > i)
-              {
-                PhyML_Fprintf(stderr,"\n. Err in file %s at line %d\n\n",__FILE__,__LINE__);
-                Warn_And_Exit("");
-              }
-          }
-          }
-    }
+          while(hash_rep[slot] != -1 && hash_key[slot] != key) slot = (slot + 1U) & hash_mask;
+
+          if(hash_rep[slot] == -1)
+            {
+              hash_key[slot] = key;
+              hash_rep[slot] = i;
+              p_lk_loc_d[i] = i;
+              patt_id_d[i] = num_subpatt++;
+            }
+          else
+            {
+              rep = hash_rep[slot];
+              p_lk_loc_d[i] = rep;
+              patt_id_d[i] = patt_id_d[rep];
+            }
+        }
     }
 }
 
