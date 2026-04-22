@@ -936,6 +936,7 @@ typedef struct __Tree{
   phydbl                      tip_order_score;
   int                         write_tax_names;
   int                    update_alias_subpatt;
+  phydbl                 *alias_subpatt_wght;
 
   phydbl                           geo_mig_sd; /*! standard deviation of the migration step random variable */
   phydbl                              geo_lnL; /*! log likelihood of the phylo-geography model */
@@ -2639,6 +2640,10 @@ void Alias_Subpatt_Pre(t_node *a, t_node *d, t_tree *tree);
 void Alias_Subpatt_Post(t_node *a, t_node *d, t_tree *tree);
 void Alias_One_Subpatt(t_node *a, t_node *d, t_tree *tree);
 void Alias_Subpatt(t_tree *tree);
+int PhyML_Use_Subpatt_Aliasing(const t_tree *tree, const int *p_lk_loc);
+const phydbl *PhyML_Prepare_Subpatt_Weight_Mask(t_tree *tree, const int *p_lk_loc);
+void PhyML_Copy_Subpatt_Partials_Range(const t_tree *tree, phydbl *p_lk, int *sum_scale, const int *p_lk_loc, unsigned int ncatg, unsigned int ns, unsigned int site_begin, unsigned int site_end);
+void PhyML_Copy_Subpatt_Partials(const t_tree *tree, phydbl *p_lk, int *sum_scale, const int *p_lk_loc, unsigned int ncatg, unsigned int ns);
 void Map_Mutations(t_node *a, t_node *d, int sa, int sd, t_edge *b, int site, int rcat, int *muttype, phydbl *muttime, int *muttax, int *n_mut, t_tree *tree);
 void Set_Update_Eigen(int yesno, t_mod *mod);
 int *Order_Int(const int *u, const int n);

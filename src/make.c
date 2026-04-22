@@ -143,6 +143,7 @@ void Make_Tree_For_Lk(t_tree *tree)
   tree->site_lk_cat          = (phydbl *)mCalloc(MAX(tree->mod->ras->n_catg,tree->mod->n_mixt_classes),sizeof(phydbl));
   tree->unscaled_site_lk_cat = (phydbl *)mCalloc(MAX(tree->mod->ras->n_catg,tree->mod->n_mixt_classes)*tree->n_pattern,sizeof(phydbl));
   tree->fact_sum_scale       = (int *)mCalloc(tree->n_pattern,sizeof(int));
+  tree->alias_subpatt_wght   = (phydbl *)mCalloc(tree->n_pattern,sizeof(phydbl));
   
 #if (defined(__AVX__) || defined(__AVX2__))
 #ifndef WIN32

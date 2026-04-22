@@ -3396,6 +3396,77 @@ void Update_Partial_Lk_Generic(t_tree *tree, t_edge *b, t_node *d)
 //////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////
 
+int PhyML_Use_Subpatt_Aliasing(const t_tree *tree, const int *p_lk_loc)
+{
+  if(tree == NULL || tree->io == NULL || p_lk_loc == NULL) return NO;
+  if(tree->io->do_alias_subpatt != YES) return NO;
+  if(tree->update_alias_subpatt != YES) return NO;
+  return YES;
+}
+
+const phydbl *PhyML_Prepare_Subpatt_Weight_Mask(t_tree *tree, const int *p_lk_loc)
+{
+  phydbl *alias_wght;
+  unsigned int site;
+
+  if(PhyML_Use_Subpatt_Aliasing(tree,p_lk_loc) == NO) return tree->data->wght;
+
+  assert(tree->alias_subpatt_wght != NULL);
+
+  alias_wght = tree->alias_subpatt_wght;
+  for(site=0;site<tree->n_pattern;++site) alias_wght[site] = 0.0;
+
+  for(site=0;site<tree->n_pattern;++site)
+    {
+      if(tree->data->wght[site] > SMALL)
+        {
+          const int rep = p_lk_loc[site];
+          assert(rep >= 0);
+          assert((unsigned int)rep < tree->n_pattern);
+          alias_wght[rep] = 1.0;
+        }
+    }
+
+  return alias_wght;
+}
+
+void PhyML_Copy_Subpatt_Partials_Range(const t_tree *tree,
+                                       phydbl *p_lk, int *sum_scale, const int *p_lk_loc,
+                                       unsigned int ncatg, unsigned int ns,
+                                       unsigned int site_begin, unsigned int site_end)
+{
+  const size_t site_stride = (size_t)ncatg * (size_t)ns;
+  unsigned int site;
+
+  if(PhyML_Use_Subpatt_Aliasing(tree,p_lk_loc) == NO || p_lk == NULL) return;
+
+  for(site=site_begin;site<site_end;++site)
+    {
+      const int rep = p_lk_loc[site];
+
+      if(rep == (int)site) continue;
+
+      assert(rep >= 0);
+      assert((unsigned int)rep < tree->n_pattern);
+
+      memcpy(p_lk + (size_t)site * site_stride,
+             p_lk + (size_t)rep * site_stride,
+             site_stride * sizeof(phydbl));
+
+      if(sum_scale != NULL) sum_scale[site] = sum_scale[rep];
+    }
+}
+
+void PhyML_Copy_Subpatt_Partials(const t_tree *tree,
+                                 phydbl *p_lk, int *sum_scale, const int *p_lk_loc,
+                                 unsigned int ncatg, unsigned int ns)
+{
+  PhyML_Copy_Subpatt_Partials_Range(tree,p_lk,sum_scale,p_lk_loc,ncatg,ns,0U,tree->n_pattern);
+}
+
+//////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////
+
 void Default_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
 {
 /*
@@ -3415,6 +3486,7 @@ void Default_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
   phydbl *tPij1,*tPij2;
   int *sum_scale, *sum_scale_v1, *sum_scale_v2;
   int *p_lk_loc;//Suppose site j, of a certain subtree, has "A" on one tip, and "C" on the other. If you come across this pattern again at site i<j, then you can simply copy the partial likelihoods
+  const phydbl *wght;
   
   const unsigned int ncatg = tree->mod->ras->n_catg;
   const unsigned int ns = tree->mod->ns;
@@ -3449,6 +3521,8 @@ void Default_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
                      &Pij1,&tPij1,&p_lk_v1,&sum_scale_v1,
                      &Pij2,&tPij2,&p_lk_v2,&sum_scale_v2,
                      d,b,tree);
+
+  wght = PhyML_Prepare_Subpatt_Weight_Mask(tree,p_lk_loc);
   
   Core_Default_Update_Partial_Lk(n_v1,n_v2,
                                  p_lk,p_lk_v1,p_lk_v2,
@@ -3456,7 +3530,10 @@ void Default_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
                                  sum_scale,sum_scale_v1,sum_scale_v2,
                                  ns,ncatg,n_patterns,
                                  tree->apply_lk_scaling,
-                                 tree->data->wght);
+                                 wght);
+
+  if(wght != tree->data->wght)
+    PhyML_Copy_Subpatt_Partials(tree,p_lk,sum_scale,p_lk_loc,ncatg,ns);
 }
 
 #if PHYML_MT_LK_RUNTIME && PHYML_OPT_PARTIAL_LK
@@ -3469,6 +3546,8 @@ static void Default_Update_Partial_Lk_Team(t_tree *tree, t_edge *b, t_node *d, t
   phydbl *tPij1,*tPij2;
   int *sum_scale, *sum_scale_v1, *sum_scale_v2;
   int *p_lk_loc;
+  const phydbl *wght;
+  int use_alias;
   const unsigned int ncatg = tree->mod->ras->n_catg;
   const unsigned int ns = tree->mod->ns;
   const unsigned int n_patterns = tree->n_pattern;
@@ -3489,13 +3568,36 @@ static void Default_Update_Partial_Lk_Team(t_tree *tree, t_edge *b, t_node *d, t
                      &Pij2,&tPij2,&p_lk_v2,&sum_scale_v2,
                      d,b,tree);
 
+  wght = tree->data->wght;
+  use_alias = PhyML_Use_Subpatt_Aliasing(tree,p_lk_loc);
+
+  if(use_alias == YES)
+    {
+      #pragma omp single
+      {
+        PhyML_Prepare_Subpatt_Weight_Mask(tree,p_lk_loc);
+      }
+      #pragma omp barrier
+      wght = tree->alias_subpatt_wght;
+    }
+
   Core_Default_Update_Partial_Lk_Team(n_v1,n_v2,
                                       p_lk,p_lk_v1,p_lk_v2,
                                       Pij1,Pij2,
                                       sum_scale,sum_scale_v1,sum_scale_v2,
                                       (int)ns,(int)ncatg,(int)n_patterns,
                                       tree->apply_lk_scaling,
-                                      tree->data->wght);
+                                      wght);
+
+  if(use_alias == YES)
+    {
+      #pragma omp for schedule(static)
+      for(int site=0;site<(int)n_patterns;++site)
+        {
+          if(p_lk_loc[site] != site)
+            PhyML_Copy_Subpatt_Partials_Range(tree,p_lk,sum_scale,p_lk_loc,ncatg,ns,(unsigned int)site,(unsigned int)site+1U);
+        }
+    }
 }
 #endif
 
