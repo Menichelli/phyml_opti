@@ -151,6 +151,9 @@ void Make_Tree_For_Lk(t_tree *tree)
   tree->alias_subpatt_hash_size = alias_hash_size;
   tree->alias_subpatt_hash_key  = (unsigned long long *)mCalloc(alias_hash_size,sizeof(unsigned long long));
   tree->alias_subpatt_hash_rep  = (int *)mCalloc(alias_hash_size,sizeof(int));
+  tree->alias_subpatt_hash_offset = (unsigned int *)mCalloc(alias_hash_size,sizeof(unsigned int));
+  tree->alias_subpatt_hash_fill   = (unsigned int *)mCalloc(alias_hash_size,sizeof(unsigned int));
+  tree->alias_subpatt_occ_sites   = (unsigned int *)mCalloc(tree->n_pattern,sizeof(unsigned int));
   
 #if (defined(__AVX__) || defined(__AVX2__))
 #ifndef WIN32

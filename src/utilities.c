@@ -12279,33 +12279,102 @@ static unsigned int Alias_Subpatt_Hash_Slot(unsigned long long key, unsigned int
 //////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////
 
+static unsigned int *Alias_Subpatt_Count_Ptr(t_node *d, t_edge *b)
+{
+  return (d == b->left) ? &(b->n_subpatt_left) : &(b->n_subpatt_rght);
+}
+
+static void Alias_Subpatt_Disable_Internal(int *patt_id_d,
+                                           int *p_lk_loc_d,
+                                           unsigned int *n_subpatt_d,
+                                           unsigned int n_pattern)
+{
+  unsigned int i;
+
+  for(i=0U;i<n_pattern;++i)
+    {
+      p_lk_loc_d[i] = (int)i;
+      patt_id_d[i] = (int)i;
+    }
+
+  *n_subpatt_d = n_pattern;
+}
+
+static int Alias_Subpatt_Enable_Internal(const t_tree *tree,
+                                         unsigned int n_subpatt_v1,
+                                         unsigned int n_subpatt_v2)
+{
+  unsigned long long pair_space;
+  const unsigned int max_subpatt = (unsigned int)tree->n_pattern;
+
+  if(n_subpatt_v1 == 0U || n_subpatt_v2 == 0U) return NO;
+  if(n_subpatt_v1 > max_subpatt / 2U) return NO;
+  if(n_subpatt_v2 > max_subpatt / 2U) return NO;
+
+  pair_space = (unsigned long long)n_subpatt_v1 * (unsigned long long)n_subpatt_v2;
+  if(pair_space >= (unsigned long long)tree->alias_subpatt_hash_size) return NO;
+
+  return YES;
+}
+
+static unsigned int Alias_Subpatt_Find_Occurrence(const unsigned int *occ_sites,
+                                                  unsigned int count,
+                                                  unsigned int limit)
+{
+  unsigned int left, right;
+
+  left = 0U;
+  right = count;
+
+  while(left < right)
+    {
+      const unsigned int mid = left + (right - left) / 2U;
+
+      if(occ_sites[mid] < limit) left = mid + 1U;
+      else right = mid;
+    }
+
+  assert(left < count);
+  return occ_sites[left];
+}
+
 void Alias_One_Subpatt(t_node *a, t_node *d, t_tree *tree)
 {
   int i;
   int *patt_id_v1, *patt_id_v2, *patt_id_d;
-  int *p_lk_loc_d;
+  int *p_lk_loc_d, *p_lk_loc_v1, *p_lk_loc_v2;
   t_node *v1, *v2;
   t_edge *b0, *b1, *b2;
-  int num_subpatt;
+  unsigned int *n_subpatt_d, *n_subpatt_v1, *n_subpatt_v2;
   unsigned long long *hash_key;
   int *hash_rep;
+  unsigned int *hash_offset, *hash_fill, *occ_sites;
   unsigned int hash_mask;
+  unsigned int num_subpatt;
 
   b0 = b1 = b2 = NULL;
   hash_key = tree->alias_subpatt_hash_key;
   hash_rep = tree->alias_subpatt_hash_rep;
+  hash_offset = tree->alias_subpatt_hash_offset;
+  hash_fill = tree->alias_subpatt_hash_fill;
+  occ_sites = tree->alias_subpatt_occ_sites;
   hash_mask = tree->alias_subpatt_hash_size - 1U;
 
   assert(hash_key != NULL);
   assert(hash_rep != NULL);
+  assert(hash_offset != NULL);
+  assert(hash_fill != NULL);
+  assert(occ_sites != NULL);
   assert(tree->alias_subpatt_hash_size > 0U);
 
   memset(hash_rep,0xFF,tree->alias_subpatt_hash_size * sizeof(int));
 
   if(d->tax)
     {
-      patt_id_d  = (d == d->b[0]->left)?(d->b[0]->patt_id_left):(d->b[0]->patt_id_rght);
-      p_lk_loc_d = (d == d->b[0]->left)?(d->b[0]->p_lk_loc_left):(d->b[0]->p_lk_loc_rght);
+      patt_id_d   = (d == d->b[0]->left)?(d->b[0]->patt_id_left):(d->b[0]->patt_id_rght);
+      p_lk_loc_d  = (d == d->b[0]->left)?(d->b[0]->p_lk_loc_left):(d->b[0]->p_lk_loc_rght);
+      n_subpatt_d = Alias_Subpatt_Count_Ptr(d,d->b[0]);
+      num_subpatt = 0U;
 
       for(i=0;i<tree->n_pattern;i++)
         {
@@ -12319,18 +12388,20 @@ void Alias_One_Subpatt(t_node *a, t_node *d, t_tree *tree)
               hash_key[slot] = key;
               hash_rep[slot] = i;
               p_lk_loc_d[i] = i;
+              num_subpatt++;
             }
           else
             {
               p_lk_loc_d[i] = hash_rep[slot];
             }
         }
+
+      *n_subpatt_d = num_subpatt;
       return;
     }
-  else
-    {
-      v1 = v2 = NULL;
-      for(i=0;i<3;i++)
+
+  v1 = v2 = NULL;
+  for(i=0;i<3;i++)
     {
       if(d->v[i] != a && !(a == tree->n_root && d->b[i] == tree->e_root))
         {
@@ -12344,35 +12415,90 @@ void Alias_One_Subpatt(t_node *a, t_node *d, t_tree *tree)
     }
 
 
-      patt_id_v1  = (v1 == b1->left)?(b1->patt_id_left):(b1->patt_id_rght);
-      patt_id_v2  = (v2 == b2->left)?(b2->patt_id_left):(b2->patt_id_rght);
-      patt_id_d   = (d  == b0->left)?(b0->patt_id_left):(b0->patt_id_rght);
-      p_lk_loc_d  = (d  == b0->left)?(b0->p_lk_loc_left):(b0->p_lk_loc_rght);
+  patt_id_v1  = (v1 == b1->left)?(b1->patt_id_left):(b1->patt_id_rght);
+  patt_id_v2  = (v2 == b2->left)?(b2->patt_id_left):(b2->patt_id_rght);
+  patt_id_d   = (d  == b0->left)?(b0->patt_id_left):(b0->patt_id_rght);
+  p_lk_loc_d  = (d  == b0->left)?(b0->p_lk_loc_left):(b0->p_lk_loc_rght);
+  p_lk_loc_v1 = (v1 == b1->left)?(b1->p_lk_loc_left):(b1->p_lk_loc_rght);
+  p_lk_loc_v2 = (v2 == b2->left)?(b2->p_lk_loc_left):(b2->p_lk_loc_rght);
+  n_subpatt_v1 = Alias_Subpatt_Count_Ptr(v1,b1);
+  n_subpatt_v2 = Alias_Subpatt_Count_Ptr(v2,b2);
+  n_subpatt_d  = Alias_Subpatt_Count_Ptr(d,b0);
 
-      num_subpatt = 0;
-      for(i=0;i<tree->n_pattern;i++)
+  if(Alias_Subpatt_Enable_Internal(tree,*n_subpatt_v1,*n_subpatt_v2) == NO)
+    {
+      Alias_Subpatt_Disable_Internal(patt_id_d,p_lk_loc_d,n_subpatt_d,(unsigned int)tree->n_pattern);
+      return;
+    }
+
+  for(i=0;i<tree->n_pattern;i++)
+    {
+      const unsigned long long key = Alias_Subpatt_Hash_Key(patt_id_v1[i],patt_id_v2[i]);
+      unsigned int slot = Alias_Subpatt_Hash_Slot(key,hash_mask);
+
+      while(hash_rep[slot] != -1 && hash_key[slot] != key) slot = (slot + 1U) & hash_mask;
+
+      if(hash_rep[slot] == -1)
         {
-          const unsigned long long key = Alias_Subpatt_Hash_Key(patt_id_v1[i],patt_id_v2[i]);
-          unsigned int slot = Alias_Subpatt_Hash_Slot(key,hash_mask);
-          int rep;
-
-          while(hash_rep[slot] != -1 && hash_key[slot] != key) slot = (slot + 1U) & hash_mask;
-
-          if(hash_rep[slot] == -1)
-            {
-              hash_key[slot] = key;
-              hash_rep[slot] = i;
-              p_lk_loc_d[i] = i;
-              patt_id_d[i] = num_subpatt++;
-            }
-          else
-            {
-              rep = hash_rep[slot];
-              p_lk_loc_d[i] = rep;
-              patt_id_d[i] = patt_id_d[rep];
-            }
+          hash_key[slot] = key;
+          hash_rep[slot] = 1;
+        }
+      else
+        {
+          hash_rep[slot] += 1;
         }
     }
+
+  num_subpatt = 0U;
+  for(i=0;i<(int)tree->alias_subpatt_hash_size;++i)
+    {
+      if(hash_rep[i] == -1) continue;
+      hash_offset[i] = num_subpatt;
+      hash_fill[i] = num_subpatt;
+      num_subpatt += (unsigned int)hash_rep[i];
+    }
+
+  assert(num_subpatt == (unsigned int)tree->n_pattern);
+
+  for(i=0;i<tree->n_pattern;i++)
+    {
+      const unsigned long long key = Alias_Subpatt_Hash_Key(patt_id_v1[i],patt_id_v2[i]);
+      unsigned int slot = Alias_Subpatt_Hash_Slot(key,hash_mask);
+
+      while(hash_rep[slot] != -1 && hash_key[slot] != key) slot = (slot + 1U) & hash_mask;
+
+      assert(hash_rep[slot] != -1);
+      occ_sites[hash_fill[slot]++] = (unsigned int)i;
+    }
+
+  num_subpatt = 0U;
+  for(i=0;i<tree->n_pattern;i++)
+    {
+      const unsigned long long key = Alias_Subpatt_Hash_Key(patt_id_v1[i],patt_id_v2[i]);
+      unsigned int slot = Alias_Subpatt_Hash_Slot(key,hash_mask);
+      unsigned int rep_site;
+
+      while(hash_rep[slot] != -1 && hash_key[slot] != key) slot = (slot + 1U) & hash_mask;
+
+      assert(hash_rep[slot] != -1);
+
+      if(p_lk_loc_v1[i] == i || p_lk_loc_v2[i] == i)
+        {
+          rep_site = (unsigned int)i;
+        }
+      else
+        {
+          rep_site = Alias_Subpatt_Find_Occurrence(occ_sites + hash_offset[slot],
+                                                   (unsigned int)hash_rep[slot],
+                                                   (unsigned int)MAX(p_lk_loc_v1[i],p_lk_loc_v2[i]));
+        }
+
+      p_lk_loc_d[i] = (int)rep_site;
+      if(rep_site == (unsigned int)i) patt_id_d[i] = (int)num_subpatt++;
+      else patt_id_d[i] = patt_id_d[rep_site];
+    }
+
+  *n_subpatt_d = num_subpatt;
 }
 
 //////////////////////////////////////////////////////////////

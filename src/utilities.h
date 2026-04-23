@@ -704,6 +704,8 @@ typedef struct __Edge {
   int                       *patt_id_rght;
   int                      *p_lk_loc_left;
   int                      *p_lk_loc_rght;
+  unsigned int            n_subpatt_left;
+  unsigned int            n_subpatt_rght;
 
   int            *pars_l,*pars_r; /*! parsimony of the subtree on the left and right sides (for each site) */
   int               *ui_l, *ui_r; /*! union - intersection vectors used in Fitch's parsimony algorithm */
@@ -939,6 +941,9 @@ typedef struct __Tree{
   phydbl                 *alias_subpatt_wght;
   unsigned long long     *alias_subpatt_hash_key;
   int                    *alias_subpatt_hash_rep;
+  unsigned int           *alias_subpatt_hash_offset;
+  unsigned int           *alias_subpatt_hash_fill;
+  unsigned int           *alias_subpatt_occ_sites;
   unsigned int            alias_subpatt_hash_size;
   unsigned int           *alias_subpatt_active_sites;
   unsigned int            alias_subpatt_nactive_sites;

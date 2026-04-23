@@ -743,9 +743,16 @@ void SSE_Update_Partial_Lk_Team(t_tree *tree, t_edge *b, t_node *d, t_lk_thread_
         PhyML_Prepare_Subpatt_Weight_Mask(tree,p_lk_loc);
       }
       #pragma omp barrier
-      wght = tree->alias_subpatt_wght;
-      active_sites = tree->alias_subpatt_active_sites;
-      active_nsites = tree->alias_subpatt_nactive_sites;
+      if(tree->alias_subpatt_nactive_sites > 0U && tree->alias_subpatt_nactive_sites < npattern)
+        {
+          wght = tree->alias_subpatt_wght;
+          active_sites = tree->alias_subpatt_active_sites;
+          active_nsites = tree->alias_subpatt_nactive_sites;
+        }
+      else
+        {
+          use_alias = NO;
+        }
     }
 
   SSE_Update_Partial_Lk_Prepared_Team(tree,
