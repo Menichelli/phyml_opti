@@ -478,6 +478,7 @@ static void SSE_Update_Partial_Lk_Prepared_Range(t_tree *tree,
                                                  const __m128d *init_tPij1, const __m128d *init_tPij2,
                                                  const unsigned int site_begin, const unsigned int site_end,
                                                  const unsigned int ns, const unsigned int ncatg,
+                                                 const phydbl *wght,
                                                  t_lk_thread_ctx *ctx)
 {
   const unsigned int ncatgns = ncatg * ns;
@@ -521,7 +522,7 @@ static void SSE_Update_Partial_Lk_Prepared_Range(t_tree *tree,
       const phydbl *site_plk1,*site_plk2;
       const __m128d *site_tPij1,*site_tPij2;
 
-      if(tree->data->wght[site] <= SMALL) continue;
+      if(wght[site] <= SMALL) continue;
 
       site_plk0 = plk0 + (size_t)site * ncatgns;
       site_plk1 = plk1 + (size_t)site * plk1_site_stride;
@@ -637,6 +638,7 @@ static void SSE_Update_Partial_Lk_Prepared_Team(t_tree *tree,
                                                 int *sum_scale, const int *sum_scale_v1, const int *sum_scale_v2,
                                                 const __m128d *init_tPij1, const __m128d *init_tPij2,
                                                 const unsigned int npattern, const unsigned int ns, const unsigned int ncatg,
+                                                const phydbl *wght,
                                                 t_lk_thread_ctx *ctx)
 {
   unsigned int begin,end;
@@ -649,7 +651,7 @@ static void SSE_Update_Partial_Lk_Prepared_Team(t_tree *tree,
                                        plk0,plk1,plk2,
                                        sum_scale,sum_scale_v1,sum_scale_v2,
                                        init_tPij1,init_tPij2,
-                                       begin,end,ns,ncatg,ctx);
+                                       begin,end,ns,ncatg,wght,ctx);
 }
 
 static void SSE_Update_Partial_Lk_MT(t_tree *tree,
@@ -658,6 +660,7 @@ static void SSE_Update_Partial_Lk_MT(t_tree *tree,
                                      int *sum_scale, const int *sum_scale_v1, const int *sum_scale_v2,
                                      const __m128d *init_tPij1, const __m128d *init_tPij2,
                                      const unsigned int npattern, const unsigned int ns, const unsigned int ncatg,
+                                     const phydbl *wght,
                                      const int nthreads)
 {
   #pragma omp parallel num_threads(nthreads)
@@ -668,7 +671,7 @@ static void SSE_Update_Partial_Lk_MT(t_tree *tree,
                                           plk0,plk1,plk2,
                                           sum_scale,sum_scale_v1,sum_scale_v2,
                                           init_tPij1,init_tPij2,
-                                          npattern,ns,ncatg,ctx);
+                                          npattern,ns,ncatg,wght,ctx);
     }
 }
 #endif
@@ -684,10 +687,13 @@ void SSE_Update_Partial_Lk_Team(t_tree *tree, t_edge *b, t_node *d, t_lk_thread_
   phydbl *tPij1,*tPij2;
   int *sum_scale, *sum_scale_v1, *sum_scale_v2;
   int *p_lk_loc;
+  const phydbl *wght;
+  int use_alias;
   const unsigned int npattern = tree->n_pattern;
   const unsigned int ns = tree->mod->ns;
   const unsigned int ncatg = tree->mod->ras->n_catg;
   const __m128d *init_tPij1,*init_tPij2;
+  unsigned int begin,end;
 
   assert(ctx != NULL);
 
@@ -717,13 +723,36 @@ void SSE_Update_Partial_Lk_Team(t_tree *tree, t_edge *b, t_node *d, t_lk_thread_
 
   init_tPij1 = SSE_Find_Packed_tPij(tree,tPij1);
   init_tPij2 = SSE_Find_Packed_tPij(tree,tPij2);
+  wght = tree->data->wght;
+  use_alias = PhyML_Use_Subpatt_Aliasing(tree,p_lk_loc);
+
+  if(use_alias == YES)
+    {
+      #pragma omp single
+      {
+        PhyML_Prepare_Subpatt_Weight_Mask(tree,p_lk_loc);
+      }
+      #pragma omp barrier
+      if(tree->alias_subpatt_nactive_sites < npattern)
+        wght = tree->alias_subpatt_wght;
+      else
+        use_alias = NO;
+    }
 
   SSE_Update_Partial_Lk_Prepared_Team(tree,
                                       n_v1,n_v2,
                                       plk0,plk1,plk2,
                                       sum_scale,sum_scale_v1,sum_scale_v2,
                                       init_tPij1,init_tPij2,
-                                      npattern,ns,ncatg,ctx);
+                                      npattern,ns,ncatg,wght,ctx);
+
+  if(use_alias == YES)
+    {
+      #pragma omp barrier
+      PhyML_MT_SSE_Get_Site_Range(npattern,&begin,&end);
+      PhyML_Copy_Subpatt_Partials_Range(tree,plk0,sum_scale,p_lk_loc,ncatg,ns,begin,end);
+      #pragma omp barrier
+    }
 }
 
 void SSE_Update_Partial_Lk_Wavefront_Job(t_tree *tree, t_edge *b, t_node *d, t_lk_thread_ctx *ctx)
@@ -734,6 +763,7 @@ void SSE_Update_Partial_Lk_Wavefront_Job(t_tree *tree, t_edge *b, t_node *d, t_l
   phydbl *tPij1,*tPij2;
   int *sum_scale, *sum_scale_v1, *sum_scale_v2;
   int *p_lk_loc;
+  const phydbl *wght;
   const unsigned int npattern = tree->n_pattern;
   const unsigned int ns = tree->mod->ns;
   const unsigned int ncatg = tree->mod->ras->n_catg;
@@ -760,13 +790,18 @@ void SSE_Update_Partial_Lk_Wavefront_Job(t_tree *tree, t_edge *b, t_node *d, t_l
       assert(FALSE);
     }
 
+  wght = PhyML_Prepare_Subpatt_Weight_Mask(tree,p_lk_loc);
+
   SSE_Update_Partial_Lk_Prepared_Range(tree,
                                        n_v1,n_v2,
                                        plk0,plk1,plk2,
                                        sum_scale,sum_scale_v1,sum_scale_v2,
                                        SSE_Find_Packed_tPij(tree,tPij1),
                                        SSE_Find_Packed_tPij(tree,tPij2),
-                                       0U,npattern,ns,ncatg,ctx);
+                                       0U,npattern,ns,ncatg,wght,ctx);
+
+  if(wght != tree->data->wght)
+    PhyML_Copy_Subpatt_Partials(tree,plk0,sum_scale,p_lk_loc,ncatg,ns);
 }
 #endif
 
@@ -1100,6 +1135,7 @@ void SSE_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
 */
   t_node *n_v1, *n_v2;
   phydbl *plk0,*plk1,*plk2;
+  phydbl *plk0_base;
   phydbl *Pij1,*Pij2;
   phydbl *tPij1,*tPij2;
   int *sum_scale, *sum_scale_v1, *sum_scale_v2;
@@ -1126,6 +1162,7 @@ void SSE_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
   __m128d *_tPij1,*_tPij2,*_pmat1plk1,*_pmat2plk2,*_plk0;
   const __m128d *init_tPij1,*init_tPij2;
   int tax_v1, tax_v2;
+  const phydbl *wght;
   const int scale_fast = (tree->scaling_method == SCALE_FAST);
   const int do_scaling = (scale_fast && tree->apply_lk_scaling == YES);
   int plk1_catg_step, plk2_catg_step;
@@ -1158,6 +1195,7 @@ void SSE_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
                      &Pij1,&tPij1,&plk1,&sum_scale_v1,
                      &Pij2,&tPij2,&plk2,&sum_scale_v2,
                      d,b,tree);
+  plk0_base = plk0;
 
   tax_v1 = (n_v1->tax != 0);
   tax_v2 = (n_v2->tax != 0);
@@ -1174,6 +1212,7 @@ void SSE_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
 
   init_tPij1 = SSE_Find_Packed_tPij(tree,tPij1);
   init_tPij2 = SSE_Find_Packed_tPij(tree,tPij2);
+  wght = PhyML_Prepare_Subpatt_Weight_Mask(tree,p_lk_loc);
 
   if(tree->mod->augmented == YES)
     {
@@ -1193,7 +1232,9 @@ void SSE_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
                                plk0,plk1,plk2,
                                sum_scale,sum_scale_v1,sum_scale_v2,
                                init_tPij1,init_tPij2,
-                               npattern,ns,ncatg,nthreads);
+                               npattern,ns,ncatg,wght,nthreads);
+      if(wght != tree->data->wght)
+        PhyML_Copy_Subpatt_Partials(tree,plk0_base,sum_scale,p_lk_loc,ncatg,ns);
       return;
     }
   }
@@ -1202,7 +1243,7 @@ void SSE_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
   /* For every site in the alignment */
   for(site=0;site<npattern;++site)
     {
-      if(tree->data->wght[site] > SMALL)
+      if(wght[site] > SMALL)
         {
           state_v1 = state_v2 = -1;
           ambiguity_check_v1 = ambiguity_check_v2 = YES;
@@ -1420,9 +1461,12 @@ void SSE_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
         {
           plk0 += ncatgns;
           plk1 += plk1_zero_wght_step;
-          plk2 += plk2_zero_wght_step;        
+          plk2 += plk2_zero_wght_step;
         }
     }
+
+  if(wght != tree->data->wght)
+    PhyML_Copy_Subpatt_Partials(tree,plk0_base,sum_scale,p_lk_loc,ncatg,ns);
 }
 
 //////////////////////////////////////////////////////////////

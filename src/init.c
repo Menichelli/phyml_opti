@@ -131,6 +131,13 @@ void Init_Tree(t_tree *tree, int n_otu)
   tree->tip_order_score           = .0;
   tree->write_tax_names           = YES;
   tree->update_alias_subpatt      = NO;
+  tree->alias_subpatt_wght        = NULL;
+  tree->alias_subpatt_rep_id_left = NULL;
+  tree->alias_subpatt_rep_id_rght = NULL;
+  tree->alias_subpatt_pair_class  = NULL;
+  tree->alias_subpatt_pair_rep    = NULL;
+  tree->alias_subpatt_pair_capacity = 0U;
+  tree->alias_subpatt_nactive_sites = 0U;
   tree->bl_ndigits                = 8;
   tree->n_short_l                 = 100;
   tree->norm_scale                = 0.0;

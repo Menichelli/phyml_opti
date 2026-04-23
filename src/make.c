@@ -120,6 +120,7 @@ void Make_Tree_For_Lk(t_tree *tree)
                                  (size_t)tree->mod->ras->n_catg *
                                  (size_t)tree->mod->ns *
                                  (size_t)tree->mod->ns;
+  const unsigned int alias_pair_capacity = 4U * (unsigned int)MAX(tree->n_pattern,1);
   size_t packed_tmat_elems = 0;
   size_t big_lk_array_elems;
 
@@ -143,6 +144,16 @@ void Make_Tree_For_Lk(t_tree *tree)
   tree->site_lk_cat          = (phydbl *)mCalloc(MAX(tree->mod->ras->n_catg,tree->mod->n_mixt_classes),sizeof(phydbl));
   tree->unscaled_site_lk_cat = (phydbl *)mCalloc(MAX(tree->mod->ras->n_catg,tree->mod->n_mixt_classes)*tree->n_pattern,sizeof(phydbl));
   tree->fact_sum_scale       = (int *)mCalloc(tree->n_pattern,sizeof(int));
+  tree->alias_subpatt_wght   = (phydbl *)mCalloc(tree->n_pattern,sizeof(phydbl));
+  tree->alias_subpatt_rep_id_left =
+    (int *)mCalloc(tree->n_pattern,sizeof(int));
+  tree->alias_subpatt_rep_id_rght =
+    (int *)mCalloc(tree->n_pattern,sizeof(int));
+  tree->alias_subpatt_pair_capacity = alias_pair_capacity;
+  tree->alias_subpatt_pair_class =
+    (int *)mCalloc((int)alias_pair_capacity,sizeof(int));
+  tree->alias_subpatt_pair_rep =
+    (int *)mCalloc((int)alias_pair_capacity,sizeof(int));
   
 #if (defined(__AVX__) || defined(__AVX2__))
 #ifndef WIN32

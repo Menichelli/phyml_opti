@@ -12241,6 +12241,53 @@ void List_Taxa_In_Clade(t_node *a, t_node *d, t_tree *tree)
 /*////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////*/
 
+static unsigned int *Alias_Subpatt_Count_Ptr(t_node *d, t_edge *b)
+{
+  return (d == b->left) ? &(b->n_subpatt_left) : &(b->n_subpatt_rght);
+}
+
+static void Alias_Subpatt_Disable_Internal(int *patt_id_d,
+                                           int *p_lk_loc_d,
+                                           unsigned int *n_subpatt_d,
+                                           unsigned int n_pattern)
+{
+  unsigned int i;
+
+  for(i=0U;i<n_pattern;++i)
+    {
+      p_lk_loc_d[i] = (int)i;
+      patt_id_d[i] = (int)i;
+    }
+
+  *n_subpatt_d = n_pattern;
+}
+
+static int Alias_Subpatt_Enable_Internal(const t_tree *tree,
+                                         unsigned int n_subpatt_v1,
+                                         unsigned int n_subpatt_v2)
+{
+  unsigned long long pair_space;
+  const unsigned int max_subpatt = (unsigned int)tree->n_pattern;
+
+  if(n_subpatt_v1 == 0U || n_subpatt_v2 == 0U) return NO;
+  if(tree->alias_subpatt_pair_class == NULL) return NO;
+  if(tree->alias_subpatt_pair_rep == NULL) return NO;
+  if(n_subpatt_v1 > max_subpatt / 2U) return NO;
+  if(n_subpatt_v2 > max_subpatt / 2U) return NO;
+
+  pair_space = (unsigned long long)n_subpatt_v1 * (unsigned long long)n_subpatt_v2;
+  if(pair_space > (unsigned long long)tree->alias_subpatt_pair_capacity) return NO;
+
+  return YES;
+}
+
+static size_t Alias_Subpatt_Product_Index(unsigned int left_id,
+                                          unsigned int rght_id,
+                                          unsigned int n_left)
+{
+  return (size_t)rght_id * (size_t)n_left + (size_t)left_id;
+}
+
 void Alias_Subpatt(t_tree *tree)
 {
 
@@ -12263,13 +12310,12 @@ void Alias_Subpatt(t_tree *tree)
 void Alias_One_Subpatt(t_node *a, t_node *d, t_tree *tree)
 {
   int i,j;
-  int *patt_id_v1, *patt_id_v2, *patt_id_d;
+  int *patt_id_d;
   int *p_lk_loc_d, *p_lk_loc_v1, *p_lk_loc_v2;
   t_node *v1, *v2;
   t_edge *b0, *b1, *b2;
-  int curr_patt_id_v1, curr_patt_id_v2;
-  int curr_p_lk_loc_v1, curr_p_lk_loc_v2;
-  int num_subpatt;
+  unsigned int *n_subpatt_d, *n_subpatt_v1_stored, *n_subpatt_v2_stored;
+  unsigned int num_subpatt;
 
   b0 = b1 = b2 = NULL;
 
@@ -12277,23 +12323,39 @@ void Alias_One_Subpatt(t_node *a, t_node *d, t_tree *tree)
     {
       patt_id_d  = (d == d->b[0]->left)?(d->b[0]->patt_id_left):(d->b[0]->patt_id_rght);
       p_lk_loc_d = (d == d->b[0]->left)?(d->b[0]->p_lk_loc_left):(d->b[0]->p_lk_loc_rght);
+      n_subpatt_d = Alias_Subpatt_Count_Ptr(d,d->b[0]);
 
+      assert(tree->alias_subpatt_pair_class != NULL);
+      assert(tree->alias_subpatt_pair_capacity >= (unsigned int)tree->n_pattern);
+
+      memcpy(tree->alias_subpatt_pair_class,patt_id_d,
+             (size_t)tree->n_pattern * sizeof(int));
+
+      num_subpatt = 0U;
       for(i=0;i<tree->n_pattern;i++)
-    {
-      for(j=0;j<tree->n_pattern;j++)
         {
-          if(patt_id_d[i] == patt_id_d[j])
-        {
-          p_lk_loc_d[i] = j;
-          break;
+          const int raw_state = tree->alias_subpatt_pair_class[i];
+
+          for(j=0;j<=i;j++)
+            {
+              if(tree->alias_subpatt_pair_class[j] == raw_state)
+                {
+                  if(j == i)
+                    {
+                      p_lk_loc_d[i] = i;
+                      patt_id_d[i] = (int)num_subpatt++;
+                    }
+                  else
+                    {
+                      p_lk_loc_d[i] = j;
+                      patt_id_d[i] = patt_id_d[j];
+                    }
+                  break;
+                }
+            }
         }
-          if(j > i)
-        {
-          PhyML_Fprintf(stderr,"\n. Err in file %s at line %d\n\n",__FILE__,__LINE__);
-          Warn_And_Exit("");
-        }
-        }
-    }
+
+      *n_subpatt_d = num_subpatt;
       return;
     }
   else
@@ -12313,60 +12375,94 @@ void Alias_One_Subpatt(t_node *a, t_node *d, t_tree *tree)
     }
 
 
-      patt_id_v1  = (v1 == b1->left)?(b1->patt_id_left):(b1->patt_id_rght);
-      patt_id_v2  = (v2 == b2->left)?(b2->patt_id_left):(b2->patt_id_rght);
       patt_id_d   = (d  == b0->left)?(b0->patt_id_left):(b0->patt_id_rght);
       p_lk_loc_d  = (d  == b0->left)?(b0->p_lk_loc_left):(b0->p_lk_loc_rght);
       p_lk_loc_v1 = (v1 == b1->left)?(b1->p_lk_loc_left):(b1->p_lk_loc_rght);
       p_lk_loc_v2 = (v2 == b2->left)?(b2->p_lk_loc_left):(b2->p_lk_loc_rght);
+      n_subpatt_v1_stored = Alias_Subpatt_Count_Ptr(v1,b1);
+      n_subpatt_v2_stored = Alias_Subpatt_Count_Ptr(v2,b2);
+      n_subpatt_d  = Alias_Subpatt_Count_Ptr(d,b0);
 
-      num_subpatt = 0;
-      for(i=0;i<tree->n_pattern;i++)
-    {
-      curr_patt_id_v1  = patt_id_v1[i];
-      curr_patt_id_v2  = patt_id_v2[i];
-      curr_p_lk_loc_v1 = p_lk_loc_v1[i];
-      curr_p_lk_loc_v2 = p_lk_loc_v2[i];
+      {
+        unsigned int n_subpatt_v1;
+        unsigned int n_subpatt_v2;
+        int *rep_id_v1;
+        int *rep_id_v2;
 
-      p_lk_loc_d[i] = i;
+        rep_id_v1 = tree->alias_subpatt_rep_id_left;
+        rep_id_v2 = tree->alias_subpatt_rep_id_rght;
 
-      if((curr_p_lk_loc_v1 == i) || (curr_p_lk_loc_v2 == i))
+        assert(rep_id_v1 != NULL);
+        assert(rep_id_v2 != NULL);
+
+        memset(rep_id_v1,0xFF,(size_t)tree->n_pattern * sizeof(int));
+        memset(rep_id_v2,0xFF,(size_t)tree->n_pattern * sizeof(int));
+
+        n_subpatt_v1 = 0U;
+        for(i=0;i<tree->n_pattern;i++)
+          {
+            const int rep = p_lk_loc_v1[i];
+
+            assert(rep >= 0);
+            assert((unsigned int)rep < tree->n_pattern);
+            if(rep_id_v1[rep] == -1) rep_id_v1[rep] = (int)n_subpatt_v1++;
+          }
+
+        n_subpatt_v2 = 0U;
+        for(i=0;i<tree->n_pattern;i++)
+          {
+            const int rep = p_lk_loc_v2[i];
+
+            assert(rep >= 0);
+            assert((unsigned int)rep < tree->n_pattern);
+            if(rep_id_v2[rep] == -1) rep_id_v2[rep] = (int)n_subpatt_v2++;
+          }
+
+        if(n_subpatt_v1 != *n_subpatt_v1_stored ||
+           n_subpatt_v2 != *n_subpatt_v2_stored ||
+           Alias_Subpatt_Enable_Internal(tree,*n_subpatt_v1_stored,*n_subpatt_v2_stored) == NO ||
+           Alias_Subpatt_Enable_Internal(tree,n_subpatt_v1,n_subpatt_v2) == NO)
+          {
+            Alias_Subpatt_Disable_Internal(patt_id_d,p_lk_loc_d,n_subpatt_d,
+                                           (unsigned int)tree->n_pattern);
+            return;
+          }
+
+        memset(tree->alias_subpatt_pair_class,0xFF,
+               (size_t)n_subpatt_v1 * (size_t)n_subpatt_v2 * sizeof(int));
+
+        num_subpatt = 0U;
+        for(i=0;i<tree->n_pattern;i++)
+          {
+            const unsigned int id_v1 = (unsigned int)rep_id_v1[p_lk_loc_v1[i]];
+            const unsigned int id_v2 = (unsigned int)rep_id_v2[p_lk_loc_v2[i]];
+            const size_t pair_idx = Alias_Subpatt_Product_Index(id_v1,id_v2,n_subpatt_v1);
+
+            assert(id_v1 < n_subpatt_v1);
+            assert(id_v2 < n_subpatt_v2);
+
+            if(tree->alias_subpatt_pair_class[pair_idx] == -1)
+              {
+                tree->alias_subpatt_pair_class[pair_idx] = (int)num_subpatt;
+                tree->alias_subpatt_pair_rep[pair_idx] = i;
+                patt_id_d[i] = (int)num_subpatt++;
+                p_lk_loc_d[i] = i;
+              }
+            else
+              {
+                patt_id_d[i] = tree->alias_subpatt_pair_class[pair_idx];
+                p_lk_loc_d[i] = tree->alias_subpatt_pair_rep[pair_idx];
+              }
+          }
+      }
+
+      *n_subpatt_d = num_subpatt;
+
+      if(num_subpatt >= (unsigned int)tree->n_pattern)
         {
-          p_lk_loc_d[i] = i;
-          patt_id_d[i] = num_subpatt;
-          num_subpatt++;
+          Alias_Subpatt_Disable_Internal(patt_id_d,p_lk_loc_d,n_subpatt_d,
+                                         (unsigned int)tree->n_pattern);
         }
-      else
-        if(curr_p_lk_loc_v1 == curr_p_lk_loc_v2)
-          {
-        p_lk_loc_d[i] = curr_p_lk_loc_v1;
-        patt_id_d[i] = patt_id_d[curr_p_lk_loc_v1];
-          }
-        else
-          {
-        for(j=MAX(curr_p_lk_loc_v1,curr_p_lk_loc_v2);j<tree->n_pattern;j++)
-          {
-            if((patt_id_v1[j] == curr_patt_id_v1) &&
-               (patt_id_v2[j] == curr_patt_id_v2))
-              {
-            p_lk_loc_d[i] = j;
-
-            if(j == i)
-              {
-                patt_id_d[i] = num_subpatt;
-                num_subpatt++;
-              }
-            else patt_id_d[i] = patt_id_d[j];
-            break;
-              }
-            if(j > i)
-              {
-                PhyML_Fprintf(stderr,"\n. Err in file %s at line %d\n\n",__FILE__,__LINE__);
-                Warn_And_Exit("");
-              }
-          }
-          }
-    }
     }
 }
 
