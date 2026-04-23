@@ -3407,6 +3407,7 @@ int PhyML_Use_Subpatt_Aliasing(const t_tree *tree, const int *p_lk_loc)
 const phydbl *PhyML_Prepare_Subpatt_Weight_Mask(t_tree *tree, const int *p_lk_loc)
 {
   phydbl *alias_wght;
+  unsigned int n_active;
   unsigned int site;
 
   if(PhyML_Use_Subpatt_Aliasing(tree,p_lk_loc) == NO) return tree->data->wght;
@@ -3414,6 +3415,8 @@ const phydbl *PhyML_Prepare_Subpatt_Weight_Mask(t_tree *tree, const int *p_lk_lo
   assert(tree->alias_subpatt_wght != NULL);
 
   alias_wght = tree->alias_subpatt_wght;
+  n_active = 0U;
+  tree->alias_subpatt_nactive_sites = 0U;
   for(site=0;site<tree->n_pattern;++site) alias_wght[site] = 0.0;
 
   for(site=0;site<tree->n_pattern;++site)
@@ -3423,10 +3426,13 @@ const phydbl *PhyML_Prepare_Subpatt_Weight_Mask(t_tree *tree, const int *p_lk_lo
           const int rep = p_lk_loc[site];
           assert(rep >= 0);
           assert((unsigned int)rep < tree->n_pattern);
+          if(alias_wght[rep] <= SMALL) n_active++;
           alias_wght[rep] = 1.0;
         }
     }
 
+  tree->alias_subpatt_nactive_sites = n_active;
+  if(n_active >= tree->n_pattern) return tree->data->wght;
   return alias_wght;
 }
 
@@ -3578,7 +3584,10 @@ static void Default_Update_Partial_Lk_Team(t_tree *tree, t_edge *b, t_node *d, t
         PhyML_Prepare_Subpatt_Weight_Mask(tree,p_lk_loc);
       }
       #pragma omp barrier
-      wght = tree->alias_subpatt_wght;
+      if(tree->alias_subpatt_nactive_sites < n_patterns)
+        wght = tree->alias_subpatt_wght;
+      else
+        use_alias = NO;
     }
 
   Core_Default_Update_Partial_Lk_Team(n_v1,n_v2,
@@ -5370,6 +5379,7 @@ void Set_All_Partial_Lk(t_node **n_v1, t_node **n_v2,
         {
           *p_lk      = b->p_lk_left;
           *sum_scale = b->sum_scale_left;
+          *p_lk_loc  = b->p_lk_loc_left;
 #ifdef BEAGLE
           *dest_p_idx = b->p_lk_left_idx;
 #endif
@@ -5378,6 +5388,7 @@ void Set_All_Partial_Lk(t_node **n_v1, t_node **n_v2,
         {
           *p_lk      = b->p_lk_rght;
           *sum_scale = b->sum_scale_rght;
+          *p_lk_loc  = b->p_lk_loc_rght;
 #ifdef BEAGLE
           *dest_p_idx = b->p_lk_rght_idx;
 #endif
@@ -5429,6 +5440,7 @@ void Set_All_Partial_Lk(t_node **n_v1, t_node **n_v2,
             {
               *p_lk      = tree->n_root->b[1]->p_lk_left;
               *sum_scale = tree->n_root->b[1]->sum_scale_left;
+              *p_lk_loc  = tree->n_root->b[1]->p_lk_loc_left;
 #ifdef BEAGLE
               *dest_p_idx = tree->n_root->b[1]->p_lk_left_idx;
 #endif
@@ -5437,6 +5449,7 @@ void Set_All_Partial_Lk(t_node **n_v1, t_node **n_v2,
             {
               *p_lk      = tree->n_root->b[2]->p_lk_left;
               *sum_scale = tree->n_root->b[2]->sum_scale_left;
+              *p_lk_loc  = tree->n_root->b[2]->p_lk_loc_left;
 #ifdef BEAGLE
               *dest_p_idx = tree->n_root->b[2]->p_lk_left_idx;
 #endif
@@ -5482,6 +5495,7 @@ void Set_All_Partial_Lk(t_node **n_v1, t_node **n_v2,
                 {
                   *p_lk      = tree->n_root->b[1]->p_lk_rght;
                   *sum_scale = tree->n_root->b[1]->sum_scale_rght;
+                  *p_lk_loc  = tree->n_root->b[1]->p_lk_loc_rght;
 #ifdef BEAGLE
                   *dest_p_idx = tree->n_root->b[1]->p_lk_rght_idx;
 #endif
@@ -5490,6 +5504,7 @@ void Set_All_Partial_Lk(t_node **n_v1, t_node **n_v2,
                 {
                   *p_lk      = tree->n_root->b[2]->p_lk_rght;
                   *sum_scale = tree->n_root->b[2]->sum_scale_rght;
+                  *p_lk_loc  = tree->n_root->b[2]->p_lk_loc_rght;
 #ifdef BEAGLE
                   *dest_p_idx = tree->n_root->b[2]->p_lk_rght_idx;
 #endif

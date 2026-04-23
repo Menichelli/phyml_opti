@@ -12260,6 +12260,47 @@ void Alias_Subpatt(t_tree *tree)
 //////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////
 
+static unsigned int *Alias_Subpatt_Count_Ptr(t_node *d, t_edge *b)
+{
+  return (d == b->left) ? &(b->n_subpatt_left) : &(b->n_subpatt_rght);
+}
+
+static void Alias_Subpatt_Disable_Internal(int *patt_id_d,
+                                           int *p_lk_loc_d,
+                                           unsigned int *n_subpatt_d,
+                                           unsigned int n_pattern)
+{
+  unsigned int i;
+
+  for(i=0U;i<n_pattern;++i)
+    {
+      p_lk_loc_d[i] = (int)i;
+      patt_id_d[i] = (int)i;
+    }
+
+  *n_subpatt_d = n_pattern;
+}
+
+static int Alias_Subpatt_Enable_Internal(const t_tree *tree,
+                                         unsigned int n_subpatt_v1,
+                                         unsigned int n_subpatt_v2)
+{
+  unsigned long long pair_space;
+  const unsigned int max_subpatt = (unsigned int)tree->n_pattern;
+
+  if(n_subpatt_v1 == 0U || n_subpatt_v2 == 0U) return NO;
+  if(n_subpatt_v1 > max_subpatt / 2U) return NO;
+  if(n_subpatt_v2 > max_subpatt / 2U) return NO;
+
+  pair_space = (unsigned long long)n_subpatt_v1 * (unsigned long long)n_subpatt_v2;
+  if(pair_space >= 4ULL * (unsigned long long)MAX(max_subpatt,1U)) return NO;
+
+  return YES;
+}
+
+//////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////
+
 void Alias_One_Subpatt(t_node *a, t_node *d, t_tree *tree)
 {
   int i,j;
@@ -12267,6 +12308,7 @@ void Alias_One_Subpatt(t_node *a, t_node *d, t_tree *tree)
   int *p_lk_loc_d, *p_lk_loc_v1, *p_lk_loc_v2;
   t_node *v1, *v2;
   t_edge *b0, *b1, *b2;
+  unsigned int *n_subpatt_d, *n_subpatt_v1, *n_subpatt_v2;
   int curr_patt_id_v1, curr_patt_id_v2;
   int curr_p_lk_loc_v1, curr_p_lk_loc_v2;
   int num_subpatt;
@@ -12277,23 +12319,27 @@ void Alias_One_Subpatt(t_node *a, t_node *d, t_tree *tree)
     {
       patt_id_d  = (d == d->b[0]->left)?(d->b[0]->patt_id_left):(d->b[0]->patt_id_rght);
       p_lk_loc_d = (d == d->b[0]->left)?(d->b[0]->p_lk_loc_left):(d->b[0]->p_lk_loc_rght);
+      n_subpatt_d = Alias_Subpatt_Count_Ptr(d,d->b[0]);
+      num_subpatt = 0;
 
       for(i=0;i<tree->n_pattern;i++)
-    {
-      for(j=0;j<tree->n_pattern;j++)
         {
-          if(patt_id_d[i] == patt_id_d[j])
-        {
-          p_lk_loc_d[i] = j;
-          break;
+          for(j=0;j<tree->n_pattern;j++)
+            {
+              if(patt_id_d[i] == patt_id_d[j])
+                {
+                  p_lk_loc_d[i] = j;
+                  if(j == i) num_subpatt++;
+                  break;
+                }
+              if(j > i)
+                {
+                  PhyML_Fprintf(stderr,"\n. Err in file %s at line %d\n\n",__FILE__,__LINE__);
+                  Warn_And_Exit("");
+                }
+            }
         }
-          if(j > i)
-        {
-          PhyML_Fprintf(stderr,"\n. Err in file %s at line %d\n\n",__FILE__,__LINE__);
-          Warn_And_Exit("");
-        }
-        }
-    }
+      *n_subpatt_d = (unsigned int)num_subpatt;
       return;
     }
   else
@@ -12319,54 +12365,64 @@ void Alias_One_Subpatt(t_node *a, t_node *d, t_tree *tree)
       p_lk_loc_d  = (d  == b0->left)?(b0->p_lk_loc_left):(b0->p_lk_loc_rght);
       p_lk_loc_v1 = (v1 == b1->left)?(b1->p_lk_loc_left):(b1->p_lk_loc_rght);
       p_lk_loc_v2 = (v2 == b2->left)?(b2->p_lk_loc_left):(b2->p_lk_loc_rght);
+      n_subpatt_v1 = Alias_Subpatt_Count_Ptr(v1,b1);
+      n_subpatt_v2 = Alias_Subpatt_Count_Ptr(v2,b2);
+      n_subpatt_d  = Alias_Subpatt_Count_Ptr(d,b0);
+
+      if(Alias_Subpatt_Enable_Internal(tree,*n_subpatt_v1,*n_subpatt_v2) == NO)
+        {
+          Alias_Subpatt_Disable_Internal(patt_id_d,p_lk_loc_d,n_subpatt_d,(unsigned int)tree->n_pattern);
+          return;
+        }
 
       num_subpatt = 0;
       for(i=0;i<tree->n_pattern;i++)
-    {
-      curr_patt_id_v1  = patt_id_v1[i];
-      curr_patt_id_v2  = patt_id_v2[i];
-      curr_p_lk_loc_v1 = p_lk_loc_v1[i];
-      curr_p_lk_loc_v2 = p_lk_loc_v2[i];
-
-      p_lk_loc_d[i] = i;
-
-      if((curr_p_lk_loc_v1 == i) || (curr_p_lk_loc_v2 == i))
         {
-          p_lk_loc_d[i] = i;
-          patt_id_d[i] = num_subpatt;
-          num_subpatt++;
-        }
-      else
-        if(curr_p_lk_loc_v1 == curr_p_lk_loc_v2)
-          {
-        p_lk_loc_d[i] = curr_p_lk_loc_v1;
-        patt_id_d[i] = patt_id_d[curr_p_lk_loc_v1];
-          }
-        else
-          {
-        for(j=MAX(curr_p_lk_loc_v1,curr_p_lk_loc_v2);j<tree->n_pattern;j++)
-          {
-            if((patt_id_v1[j] == curr_patt_id_v1) &&
-               (patt_id_v2[j] == curr_patt_id_v2))
-              {
-            p_lk_loc_d[i] = j;
+          curr_patt_id_v1  = patt_id_v1[i];
+          curr_patt_id_v2  = patt_id_v2[i];
+          curr_p_lk_loc_v1 = p_lk_loc_v1[i];
+          curr_p_lk_loc_v2 = p_lk_loc_v2[i];
 
-            if(j == i)
-              {
-                patt_id_d[i] = num_subpatt;
-                num_subpatt++;
-              }
-            else patt_id_d[i] = patt_id_d[j];
-            break;
-              }
-            if(j > i)
-              {
-                PhyML_Fprintf(stderr,"\n. Err in file %s at line %d\n\n",__FILE__,__LINE__);
-                Warn_And_Exit("");
-              }
-          }
-          }
-    }
+          p_lk_loc_d[i] = i;
+
+          if((curr_p_lk_loc_v1 == i) || (curr_p_lk_loc_v2 == i))
+            {
+              p_lk_loc_d[i] = i;
+              patt_id_d[i] = num_subpatt;
+              num_subpatt++;
+            }
+          else if(curr_p_lk_loc_v1 == curr_p_lk_loc_v2)
+            {
+              p_lk_loc_d[i] = curr_p_lk_loc_v1;
+              patt_id_d[i] = patt_id_d[curr_p_lk_loc_v1];
+            }
+          else
+            {
+              for(j=MAX(curr_p_lk_loc_v1,curr_p_lk_loc_v2);j<tree->n_pattern;j++)
+                {
+                  if((patt_id_v1[j] == curr_patt_id_v1) &&
+                     (patt_id_v2[j] == curr_patt_id_v2))
+                    {
+                      p_lk_loc_d[i] = j;
+
+                      if(j == i)
+                        {
+                          patt_id_d[i] = num_subpatt;
+                          num_subpatt++;
+                        }
+                      else patt_id_d[i] = patt_id_d[j];
+                      break;
+                    }
+                  if(j > i)
+                    {
+                      PhyML_Fprintf(stderr,"\n. Err in file %s at line %d\n\n",__FILE__,__LINE__);
+                      Warn_And_Exit("");
+                    }
+                }
+            }
+        }
+
+      *n_subpatt_d = (unsigned int)num_subpatt;
     }
 }
 

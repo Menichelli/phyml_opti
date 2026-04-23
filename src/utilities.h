@@ -704,6 +704,8 @@ typedef struct __Edge {
   int                       *patt_id_rght;
   int                      *p_lk_loc_left;
   int                      *p_lk_loc_rght;
+  unsigned int            n_subpatt_left;
+  unsigned int            n_subpatt_rght;
 
   int            *pars_l,*pars_r; /*! parsimony of the subtree on the left and right sides (for each site) */
   int               *ui_l, *ui_r; /*! union - intersection vectors used in Fitch's parsimony algorithm */
@@ -937,6 +939,7 @@ typedef struct __Tree{
   int                         write_tax_names;
   int                    update_alias_subpatt;
   phydbl                 *alias_subpatt_wght;
+  unsigned int            alias_subpatt_nactive_sites;
 
   phydbl                           geo_mig_sd; /*! standard deviation of the migration step random variable */
   phydbl                              geo_lnL; /*! log likelihood of the phylo-geography model */
