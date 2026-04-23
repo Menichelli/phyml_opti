@@ -12288,6 +12288,149 @@ static size_t Alias_Subpatt_Product_Index(unsigned int left_id,
   return (size_t)rght_id * (size_t)n_left + (size_t)left_id;
 }
 
+static int Alias_Subpatt_Build_From_Patt(const t_tree *tree,
+                                         const int *patt_id_v1,
+                                         const int *patt_id_v2,
+                                         int *patt_id_d,
+                                         int *p_lk_loc_d,
+                                         unsigned int n_subpatt_v1,
+                                         unsigned int n_subpatt_v2,
+                                         unsigned int *num_subpatt)
+{
+  unsigned int i;
+  int *pair_class;
+  int *pair_rep;
+
+  pair_class = tree->alias_subpatt_pair_class;
+  pair_rep = tree->alias_subpatt_pair_rep;
+
+  assert(pair_class != NULL);
+  assert(pair_rep != NULL);
+
+  memset(pair_class,0xFF,
+         (size_t)n_subpatt_v1 * (size_t)n_subpatt_v2 * sizeof(int));
+
+  *num_subpatt = 0U;
+  for(i=0U;i<(unsigned int)tree->n_pattern;++i)
+    {
+      const int raw_id_v1 = patt_id_v1[i];
+      const int raw_id_v2 = patt_id_v2[i];
+      unsigned int id_v1, id_v2;
+      size_t pair_idx;
+
+      if(raw_id_v1 < 0 || raw_id_v2 < 0) return NO;
+
+      id_v1 = (unsigned int)raw_id_v1;
+      id_v2 = (unsigned int)raw_id_v2;
+
+      if(id_v1 >= n_subpatt_v1 || id_v2 >= n_subpatt_v2) return NO;
+
+      pair_idx = Alias_Subpatt_Product_Index(id_v1,id_v2,n_subpatt_v1);
+
+      if(pair_class[pair_idx] == -1)
+        {
+          pair_class[pair_idx] = (int)(*num_subpatt);
+          pair_rep[pair_idx] = (int)i;
+          patt_id_d[i] = (int)(*num_subpatt);
+          p_lk_loc_d[i] = (int)i;
+          (*num_subpatt)++;
+        }
+      else
+        {
+          patt_id_d[i] = pair_class[pair_idx];
+          p_lk_loc_d[i] = pair_rep[pair_idx];
+        }
+    }
+
+  return YES;
+}
+
+static int Alias_Subpatt_Build_From_Rep(const t_tree *tree,
+                                        const int *p_lk_loc_v1,
+                                        const int *p_lk_loc_v2,
+                                        int *patt_id_d,
+                                        int *p_lk_loc_d,
+                                        unsigned int n_subpatt_v1_stored,
+                                        unsigned int n_subpatt_v2_stored,
+                                        unsigned int *num_subpatt)
+{
+  unsigned int i;
+  unsigned int n_subpatt_v1, n_subpatt_v2;
+  int *rep_id_v1;
+  int *rep_id_v2;
+  int *pair_class;
+  int *pair_rep;
+
+  rep_id_v1 = tree->alias_subpatt_rep_id_left;
+  rep_id_v2 = tree->alias_subpatt_rep_id_rght;
+  pair_class = tree->alias_subpatt_pair_class;
+  pair_rep = tree->alias_subpatt_pair_rep;
+
+  assert(rep_id_v1 != NULL);
+  assert(rep_id_v2 != NULL);
+  assert(pair_class != NULL);
+  assert(pair_rep != NULL);
+
+  memset(rep_id_v1,0xFF,(size_t)tree->n_pattern * sizeof(int));
+  memset(rep_id_v2,0xFF,(size_t)tree->n_pattern * sizeof(int));
+
+  n_subpatt_v1 = 0U;
+  for(i=0U;i<(unsigned int)tree->n_pattern;++i)
+    {
+      const int rep = p_lk_loc_v1[i];
+
+      if(rep < 0 || (unsigned int)rep >= (unsigned int)tree->n_pattern) return NO;
+      if(rep_id_v1[rep] == -1) rep_id_v1[rep] = (int)n_subpatt_v1++;
+    }
+
+  n_subpatt_v2 = 0U;
+  for(i=0U;i<(unsigned int)tree->n_pattern;++i)
+    {
+      const int rep = p_lk_loc_v2[i];
+
+      if(rep < 0 || (unsigned int)rep >= (unsigned int)tree->n_pattern) return NO;
+      if(rep_id_v2[rep] == -1) rep_id_v2[rep] = (int)n_subpatt_v2++;
+    }
+
+  if(n_subpatt_v1 != n_subpatt_v1_stored ||
+     n_subpatt_v2 != n_subpatt_v2_stored ||
+     Alias_Subpatt_Enable_Internal(tree,n_subpatt_v1,n_subpatt_v2) == NO)
+    {
+      return NO;
+    }
+
+  memset(pair_class,0xFF,
+         (size_t)n_subpatt_v1 * (size_t)n_subpatt_v2 * sizeof(int));
+
+  *num_subpatt = 0U;
+  for(i=0U;i<(unsigned int)tree->n_pattern;++i)
+    {
+      const int rep_v1 = p_lk_loc_v1[i];
+      const int rep_v2 = p_lk_loc_v2[i];
+      const unsigned int id_v1 = (unsigned int)rep_id_v1[rep_v1];
+      const unsigned int id_v2 = (unsigned int)rep_id_v2[rep_v2];
+      const size_t pair_idx = Alias_Subpatt_Product_Index(id_v1,id_v2,n_subpatt_v1);
+
+      if(rep_id_v1[rep_v1] == -1 || rep_id_v2[rep_v2] == -1) return NO;
+
+      if(pair_class[pair_idx] == -1)
+        {
+          pair_class[pair_idx] = (int)(*num_subpatt);
+          pair_rep[pair_idx] = (int)i;
+          patt_id_d[i] = (int)(*num_subpatt);
+          p_lk_loc_d[i] = (int)i;
+          (*num_subpatt)++;
+        }
+      else
+        {
+          patt_id_d[i] = pair_class[pair_idx];
+          p_lk_loc_d[i] = pair_rep[pair_idx];
+        }
+    }
+
+  return YES;
+}
+
 void Alias_Subpatt(t_tree *tree)
 {
 
@@ -12310,13 +12453,14 @@ void Alias_Subpatt(t_tree *tree)
 void Alias_One_Subpatt(t_node *a, t_node *d, t_tree *tree)
 {
   int i,j;
-  int *patt_id_d;
+  int *patt_id_v1, *patt_id_v2, *patt_id_d;
   int *p_lk_loc_d, *p_lk_loc_v1, *p_lk_loc_v2;
   t_node *v1, *v2;
   t_edge *b0, *b1, *b2;
   unsigned int *n_subpatt_d, *n_subpatt_v1_stored, *n_subpatt_v2_stored;
   unsigned int num_subpatt;
 
+  patt_id_v1 = patt_id_v2 = patt_id_d = NULL;
   b0 = b1 = b2 = NULL;
 
   if(d->tax)
@@ -12383,78 +12527,28 @@ void Alias_One_Subpatt(t_node *a, t_node *d, t_tree *tree)
       n_subpatt_v2_stored = Alias_Subpatt_Count_Ptr(v2,b2);
       n_subpatt_d  = Alias_Subpatt_Count_Ptr(d,b0);
 
-      {
-        unsigned int n_subpatt_v1;
-        unsigned int n_subpatt_v2;
-        int *rep_id_v1;
-        int *rep_id_v2;
+      if(Alias_Subpatt_Enable_Internal(tree,*n_subpatt_v1_stored,*n_subpatt_v2_stored) == NO)
+        {
+          Alias_Subpatt_Disable_Internal(patt_id_d,p_lk_loc_d,n_subpatt_d,
+                                         (unsigned int)tree->n_pattern);
+          return;
+        }
 
-        rep_id_v1 = tree->alias_subpatt_rep_id_left;
-        rep_id_v2 = tree->alias_subpatt_rep_id_rght;
-
-        assert(rep_id_v1 != NULL);
-        assert(rep_id_v2 != NULL);
-
-        memset(rep_id_v1,0xFF,(size_t)tree->n_pattern * sizeof(int));
-        memset(rep_id_v2,0xFF,(size_t)tree->n_pattern * sizeof(int));
-
-        n_subpatt_v1 = 0U;
-        for(i=0;i<tree->n_pattern;i++)
-          {
-            const int rep = p_lk_loc_v1[i];
-
-            assert(rep >= 0);
-            assert((unsigned int)rep < tree->n_pattern);
-            if(rep_id_v1[rep] == -1) rep_id_v1[rep] = (int)n_subpatt_v1++;
-          }
-
-        n_subpatt_v2 = 0U;
-        for(i=0;i<tree->n_pattern;i++)
-          {
-            const int rep = p_lk_loc_v2[i];
-
-            assert(rep >= 0);
-            assert((unsigned int)rep < tree->n_pattern);
-            if(rep_id_v2[rep] == -1) rep_id_v2[rep] = (int)n_subpatt_v2++;
-          }
-
-        if(n_subpatt_v1 != *n_subpatt_v1_stored ||
-           n_subpatt_v2 != *n_subpatt_v2_stored ||
-           Alias_Subpatt_Enable_Internal(tree,*n_subpatt_v1_stored,*n_subpatt_v2_stored) == NO ||
-           Alias_Subpatt_Enable_Internal(tree,n_subpatt_v1,n_subpatt_v2) == NO)
-          {
-            Alias_Subpatt_Disable_Internal(patt_id_d,p_lk_loc_d,n_subpatt_d,
-                                           (unsigned int)tree->n_pattern);
-            return;
-          }
-
-        memset(tree->alias_subpatt_pair_class,0xFF,
-               (size_t)n_subpatt_v1 * (size_t)n_subpatt_v2 * sizeof(int));
-
-        num_subpatt = 0U;
-        for(i=0;i<tree->n_pattern;i++)
-          {
-            const unsigned int id_v1 = (unsigned int)rep_id_v1[p_lk_loc_v1[i]];
-            const unsigned int id_v2 = (unsigned int)rep_id_v2[p_lk_loc_v2[i]];
-            const size_t pair_idx = Alias_Subpatt_Product_Index(id_v1,id_v2,n_subpatt_v1);
-
-            assert(id_v1 < n_subpatt_v1);
-            assert(id_v2 < n_subpatt_v2);
-
-            if(tree->alias_subpatt_pair_class[pair_idx] == -1)
-              {
-                tree->alias_subpatt_pair_class[pair_idx] = (int)num_subpatt;
-                tree->alias_subpatt_pair_rep[pair_idx] = i;
-                patt_id_d[i] = (int)num_subpatt++;
-                p_lk_loc_d[i] = i;
-              }
-            else
-              {
-                patt_id_d[i] = tree->alias_subpatt_pair_class[pair_idx];
-                p_lk_loc_d[i] = tree->alias_subpatt_pair_rep[pair_idx];
-              }
-          }
-      }
+      if(Alias_Subpatt_Build_From_Patt(tree,
+                                       patt_id_v1,patt_id_v2,
+                                       patt_id_d,p_lk_loc_d,
+                                       *n_subpatt_v1_stored,*n_subpatt_v2_stored,
+                                       &num_subpatt) == NO &&
+         Alias_Subpatt_Build_From_Rep(tree,
+                                      p_lk_loc_v1,p_lk_loc_v2,
+                                      patt_id_d,p_lk_loc_d,
+                                      *n_subpatt_v1_stored,*n_subpatt_v2_stored,
+                                      &num_subpatt) == NO)
+        {
+          Alias_Subpatt_Disable_Internal(patt_id_d,p_lk_loc_d,n_subpatt_d,
+                                         (unsigned int)tree->n_pattern);
+          return;
+        }
 
       *n_subpatt_d = num_subpatt;
 
