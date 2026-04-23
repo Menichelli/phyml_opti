@@ -12518,7 +12518,8 @@ void Alias_One_Subpatt(t_node *a, t_node *d, t_tree *tree)
         }
     }
 
-
+      patt_id_v1  = (v1 == b1->left)?(b1->patt_id_left):(b1->patt_id_rght);
+      patt_id_v2  = (v2 == b2->left)?(b2->patt_id_left):(b2->patt_id_rght);
       patt_id_d   = (d  == b0->left)?(b0->patt_id_left):(b0->patt_id_rght);
       p_lk_loc_d  = (d  == b0->left)?(b0->p_lk_loc_left):(b0->p_lk_loc_rght);
       p_lk_loc_v1 = (v1 == b1->left)?(b1->p_lk_loc_left):(b1->p_lk_loc_rght);
