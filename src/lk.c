@@ -556,6 +556,20 @@ static int PhyML_MT_Should_Fallback_ST_Lk(long long pmat_work, int pmat_threads,
   double serial_cost = 0.0;
   double mt_cost = 0.0;
   const double min_speedup = PhyML_MT_Guard_Min_Speedup();
+  int parallel_phases = 0;
+  int max_parallel_threads = 1;
+
+#define PHYML_MT_NOTE_PARALLEL_PHASE(work_, threads_)                 \
+  do                                                                  \
+    {                                                                 \
+      if((work_) > 0 && (threads_) > 1)                               \
+        {                                                             \
+          ++parallel_phases;                                          \
+          if((threads_) > max_parallel_threads)                       \
+            max_parallel_threads = (threads_);                        \
+        }                                                             \
+    }                                                                 \
+  while(0)
 
   if(pmat_work > 0)
     {
@@ -578,7 +592,16 @@ static int PhyML_MT_Should_Fallback_ST_Lk(long long pmat_work, int pmat_threads,
       mt_cost += (double)site_work / (double)MAX(1,site_threads);
     }
 
+  PHYML_MT_NOTE_PARALLEL_PHASE(pmat_work,pmat_threads);
+  PHYML_MT_NOTE_PARALLEL_PHASE(partial_work,partial_threads);
+  PHYML_MT_NOTE_PARALLEL_PHASE(eigen_work,eigen_threads);
+  PHYML_MT_NOTE_PARALLEL_PHASE(site_work,site_threads);
+
   if(serial_cost <= 0.0 || mt_cost <= 0.0) return NO;
+  if(parallel_phases <= 1 && max_parallel_threads <= 2)
+    return YES;
+
+#undef PHYML_MT_NOTE_PARALLEL_PHASE
   return ((serial_cost / mt_cost) < min_speedup) ? YES : NO;
 }
 
@@ -2213,18 +2236,35 @@ phydbl Lk(t_edge *b, t_tree *tree)
 #if PHYML_MT_LK_RUNTIME
   if(tree->lk_thread_ctx != NULL)
     {
+      long long pmat_work_est = 0LL;
+      long long partial_work_est = 0LL;
+      long long eigen_work_est = 0LL;
+      const long long site_work_est = (long long)npatterns * (long long)ncatg * (long long)ns;
+
       lk_mt_threads = PhyML_MT_Threads_Site_Lk((int)npatterns,(int)ncatg,(int)ns,tree);
       if(tree->use_eigen_lr == YES)
         eigen_mt_threads = PhyML_MT_Threads_Update_Eigen_Lr((int)npatterns,(int)ncatg,(int)ns,tree);
+      if(tree->use_eigen_lr == NO && tree->mod->s_opt->skip_tree_traversal == NO)
+        pmat_mt_threads = PhyML_MT_Threads_Update_PMat(full_tree_eval ? ((2 * tree->n_otu - 3) +
+                                                                         ((tree->n_root && tree->ignore_root == NO) ? 2 : 0))
+                                                                      : 1,
+                                                      (int)ncatg,(int)ns,tree);
 
-      if(tree->mod->s_opt->skip_tree_traversal == NO && full_tree_eval == YES)
+      if(tree->mod->s_opt->skip_tree_traversal == NO)
         {
-          const int npmat_edges = (2 * tree->n_otu - 3) +
-            ((tree->n_root && tree->ignore_root == NO) ? 2 : 0);
+          const int npmat_edges = full_tree_eval ?
+            ((2 * tree->n_otu - 3) + ((tree->n_root && tree->ignore_root == NO) ? 2 : 0)) :
+            1;
 
-          pmat_mt_threads = PhyML_MT_Threads_Update_PMat(npmat_edges,(int)ncatg,(int)ns,tree);
+          pmat_work_est = (tree->use_eigen_lr == NO) ?
+            ((long long)npmat_edges * (long long)ncatg * (long long)ns * (long long)ns * (long long)ns) :
+            0LL;
+          eigen_work_est = (tree->use_eigen_lr == YES) ?
+            ((long long)npatterns * (long long)ncatg * (long long)ns * (long long)ns) :
+            0LL;
 
-          if(omp_get_max_threads() > 1 &&
+          if(full_tree_eval == YES &&
+             omp_get_max_threads() > 1 &&
              PhyML_Can_Use_Update_Partial_Lk_Wavefront(tree) == YES &&
              PhyML_Ensure_Update_All_Partial_Lk_Wavefront_Cache(tree) == YES)
             {
@@ -2237,19 +2277,17 @@ phydbl Lk(t_edge *b, t_tree *tree)
                                                                           tree,
                                                                           &partial_mt_site_blocks);
               partial_mt_mode = PhyML_MT_Select_Update_All_Partial_Lk_Mode(tree);
+              partial_work_est = (long long)tree->lk_wavefront_njobs * (long long)npatterns *
+                (long long)ncatg * (long long)ns * (long long)ns;
             }
 
-          if(PhyML_MT_Should_Fallback_ST_Lk((long long)npmat_edges *
-                                            (long long)ncatg * (long long)ns * (long long)ns * (long long)ns,
+          if(PhyML_MT_Should_Fallback_ST_Lk(pmat_work_est,
                                             pmat_mt_threads,
-                                            (tree->lk_wavefront_valid == YES) ?
-                                            ((long long)tree->lk_wavefront_njobs * (long long)npatterns *
-                                             (long long)ncatg * (long long)ns * (long long)ns) : 0LL,
+                                            partial_work_est,
                                             partial_mt_threads,
-                                            (tree->use_eigen_lr == YES) ?
-                                            ((long long)npatterns * (long long)ncatg * (long long)ns * (long long)ns) : 0LL,
+                                            eigen_work_est,
                                             eigen_mt_threads,
-                                            (long long)npatterns * (long long)ncatg * (long long)ns,
+                                            site_work_est,
                                             lk_mt_threads) == YES)
             {
               partial_mt_threads = 1;
