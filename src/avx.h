@@ -30,6 +30,9 @@ void AVX_Update_Eigen_Lr(t_edge *b, t_tree *tree);
 #if PHYML_OPT_PARTIAL_LK
 void AVX_Update_Partial_Lk_Team(t_tree *tree, t_edge *b_fcus, t_node *n, t_lk_thread_ctx *ctx);
 void AVX_Update_Partial_Lk_Wavefront_Job(t_tree *tree, t_edge *b_fcus, t_node *n, t_lk_thread_ctx *ctx);
+void AVX_Update_Partial_Lk_Wavefront_Job_Range(t_tree *tree, t_edge *b_fcus, t_node *n,
+                                               unsigned int site_begin, unsigned int site_end,
+                                               t_lk_thread_ctx *ctx);
 #endif
 void AVX_Update_Eigen_Lr_Team(t_edge *b, t_tree *tree, t_lk_thread_ctx *ctx);
 void AVX_Update_Eigen_And_Lk_Sites_Team(t_edge *b, t_tree *tree, const phydbl *expl, t_lk_thread_ctx *ctx);

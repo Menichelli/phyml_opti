@@ -777,7 +777,9 @@ void AVX_Update_Partial_Lk_Team(t_tree *tree, t_edge *b, t_node *d, t_lk_thread_
     }
 }
 
-void AVX_Update_Partial_Lk_Wavefront_Job(t_tree *tree, t_edge *b, t_node *d, t_lk_thread_ctx *ctx)
+void AVX_Update_Partial_Lk_Wavefront_Job_Range(t_tree *tree, t_edge *b, t_node *d,
+                                               unsigned int site_begin, unsigned int site_end,
+                                               t_lk_thread_ctx *ctx)
 {
   t_node *n_v1, *n_v2;
   phydbl *plk0,*plk1,*plk2;
@@ -786,11 +788,11 @@ void AVX_Update_Partial_Lk_Wavefront_Job(t_tree *tree, t_edge *b, t_node *d, t_l
   int *sum_scale, *sum_scale_v1, *sum_scale_v2;
   int *p_lk_loc;
   const phydbl *wght;
-  const unsigned int npattern = tree->n_pattern;
   const unsigned int ns = tree->mod->ns;
   const unsigned int ncatg = tree->mod->ras->n_catg;
 
   assert(ctx != NULL);
+  if(site_begin >= site_end) return;
 
   n_v1 = n_v2                 = NULL;
   plk0 = plk1 = plk2          = NULL;
@@ -812,7 +814,9 @@ void AVX_Update_Partial_Lk_Wavefront_Job(t_tree *tree, t_edge *b, t_node *d, t_l
       assert(FALSE);
     }
 
-  wght = PhyML_Prepare_Subpatt_Weight_Mask(tree,p_lk_loc);
+  wght = tree->data->wght;
+  if(PhyML_Use_Subpatt_Aliasing(tree,p_lk_loc) == YES)
+    wght = PhyML_Prepare_Subpatt_Weight_Mask(tree,p_lk_loc);
 
   AVX_Update_Partial_Lk_Prepared_Range(tree,
                                        n_v1,n_v2,
@@ -820,10 +824,15 @@ void AVX_Update_Partial_Lk_Wavefront_Job(t_tree *tree, t_edge *b, t_node *d, t_l
                                        sum_scale,sum_scale_v1,sum_scale_v2,
                                        AVX_Find_Packed_tPij(tree,tPij1),
                                        AVX_Find_Packed_tPij(tree,tPij2),
-                                       0U,npattern,ns,ncatg,wght,ctx);
+                                       site_begin,site_end,ns,ncatg,wght,ctx);
 
   if(wght != tree->data->wght)
-    PhyML_Copy_Subpatt_Partials(tree,plk0,sum_scale,p_lk_loc,ncatg,ns);
+    PhyML_Copy_Subpatt_Partials_Range(tree,plk0,sum_scale,p_lk_loc,ncatg,ns,site_begin,site_end);
+}
+
+void AVX_Update_Partial_Lk_Wavefront_Job(t_tree *tree, t_edge *b, t_node *d, t_lk_thread_ctx *ctx)
+{
+  AVX_Update_Partial_Lk_Wavefront_Job_Range(tree,b,d,0U,tree->n_pattern,ctx);
 }
 #endif
 
