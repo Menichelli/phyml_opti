@@ -3897,9 +3897,6 @@ void Update_Partial_Lk_Generic(t_tree *tree, t_edge *b, t_node *d)
     }
 }
 
-//////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////
-
 void Default_Update_Partial_Lk(t_tree *tree, t_edge *b, t_node *d)
 {
 /*
@@ -4012,7 +4009,6 @@ static void Default_Update_Partial_Lk_Range(t_tree *tree, t_edge *b, t_node *d,
   phydbl *tPij1,*tPij2;
   int *sum_scale, *sum_scale_v1, *sum_scale_v2;
   int *p_lk_loc;
-  const phydbl *wght;
   const unsigned int ncatg = tree->mod->ras->n_catg;
   const unsigned int ns = tree->mod->ns;
 
@@ -4032,10 +4028,6 @@ static void Default_Update_Partial_Lk_Range(t_tree *tree, t_edge *b, t_node *d,
                      &Pij2,&tPij2,&p_lk_v2,&sum_scale_v2,
                      d,b,tree);
 
-  wght = tree->data->wght;
-  if(PhyML_Use_Subpatt_Aliasing(tree,p_lk_loc) == YES)
-    wght = PhyML_Prepare_Subpatt_Weight_Mask(tree,p_lk_loc);
-
   Core_Default_Update_Partial_Lk_Range(n_v1,n_v2,
                                        p_lk,p_lk_v1,p_lk_v2,
                                        Pij1,Pij2,
@@ -4043,10 +4035,7 @@ static void Default_Update_Partial_Lk_Range(t_tree *tree, t_edge *b, t_node *d,
                                        (int)ns,(int)ncatg,
                                        site_begin,site_end,
                                        tree->apply_lk_scaling,
-                                       wght);
-
-  if(wght != tree->data->wght)
-    PhyML_Copy_Subpatt_Partials_Range(tree,p_lk,sum_scale,p_lk_loc,ncatg,ns,site_begin,site_end);
+                                       tree->data->wght);
 }
 #endif
 

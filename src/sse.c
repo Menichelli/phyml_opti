@@ -736,7 +736,7 @@ void SSE_Update_Partial_Lk_Wavefront_Job_Range(t_tree *tree, t_edge *b, t_node *
   phydbl *tPij1,*tPij2;
   int *sum_scale, *sum_scale_v1, *sum_scale_v2;
   int *p_lk_loc;
-  const phydbl *wght;
+  const unsigned int npattern = tree->n_pattern;
   const unsigned int ns = tree->mod->ns;
   const unsigned int ncatg = tree->mod->ras->n_catg;
 
@@ -763,19 +763,13 @@ void SSE_Update_Partial_Lk_Wavefront_Job_Range(t_tree *tree, t_edge *b, t_node *
       assert(FALSE);
     }
 
-  wght = tree->data->wght;
-  if(PhyML_Use_Subpatt_Aliasing(tree,p_lk_loc) == YES)
-    wght = PhyML_Prepare_Subpatt_Weight_Mask(tree,p_lk_loc);
   SSE_Update_Partial_Lk_Prepared_Range(tree,
                                        n_v1,n_v2,
                                        plk0,plk1,plk2,
                                        sum_scale,sum_scale_v1,sum_scale_v2,
                                        SSE_Find_Packed_tPij(tree,tPij1),
                                        SSE_Find_Packed_tPij(tree,tPij2),
-                                       site_begin,site_end,ns,ncatg,wght,ctx);
-
-  if(wght != tree->data->wght)
-    PhyML_Copy_Subpatt_Partials_Range(tree,plk0,sum_scale,p_lk_loc,ncatg,ns,site_begin,site_end);
+                                       site_begin,MIN(site_end,npattern),ns,ncatg,ctx);
 }
 
 void SSE_Update_Partial_Lk_Wavefront_Job(t_tree *tree, t_edge *b, t_node *d, t_lk_thread_ctx *ctx)
